@@ -278,7 +278,6 @@ Macro$z_logwci5ya <- with(Macro, rescale(logwci5ya))
 Macro$z_discpop <- with(Macro, rescale(discpop))
 Macro$z_ucdp <- with(Macro, rescale(ucdpintraonset))
 Macro$z_instab <- with(Macro, rescale(instab))
-Macro$z_gs <- with(Macro, rescale(gs))
 
 
 Macro <- ddply(Macro, c("wave"), transform, z_logwci5ya = arm::rescale(logwci5ya))
