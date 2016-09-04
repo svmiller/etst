@@ -1,0 +1,885 @@
+---
+anonymous: no
+output: 
+  pdf_document:
+    citation_package: natbib
+    keep_tex: true
+    fig_caption: true
+    latex_engine: pdflatex
+    template: ~/Dropbox/miscelanea/svm-r-markdown-templates/svm-latex-ms.tex
+bibliography: ~/Dropbox/master.bib
+biblio-style: apsr
+geometry: margin=1in
+header-includes:
+   - \linespread{1.05}
+title: "Economic Threats or Societal Turmoil? Understanding Preferences for Authoritarian Political Systems"
+# subtitle: 
+thanks: "The author thanks Damarys Canache, K. Amber Curtis, Kelly Senters, and the three anonymous reviewers and editor at *Political Behavior* for their comments on previous versions of this manuscript. Replication files are available on the author's Github account ([github.com/svmiller](https://github.com/svmiller)). **Corresponding author**: svmille@clemson.edu."
+author:
+- name: Steven V. Miller
+  affiliation: Clemson University
+  email: svmille@clemson.edu
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+abstract: "
+Why do some individuals prefer to be governed in an authoritarian political system? One intuitive answer is that citizens prefer authoritarian rule when the economy and society are in turmoil. These are common explanations for democratic backsliding, and the emergence and success of authoritarian leaders in the twentieth century. Which of these explanations better explains preferences for authoritarian rule? Both types of threat coincide in small samples and high-profile cases, creating inferential problems. I address this by using three waves of World Values Survey data to look at individual-level preferences for different forms of authoritarian government. Using multiple macroeconomic and societal indicators, I find that economic threats, especially increasing income inequality, better explain preferences for authoritarian government. I conclude with implications for understanding the emergence of support for authoritarianism in fledgling democracies."
+fontfamily: mathpazo
+fontfamilyoptions: sc, osf
+fontsize: 11pt
+keywords: "economic threats, societal threats, political attitudes, authoritarianism"
+---
+
+```{r setup, include=FALSE, cache=FALSE}
+knitr::opts_chunk$set(cache=TRUE)
+setwd("~/Dropbox/projects/etst")
+
+library(arm)
+library(broom)
+library(stargazer)
+library(plyr)
+library(knitr)
+library(xtable)
+
+augment.ranef.mer <- function(x,
+                              ci.level=0.9,
+                              reorder=TRUE,
+                              order.var=1) {
+  tmpf <- function(z) {
+    if (is.character(order.var) && !order.var %in% names(z)) {
+      order.var <- 1
+      warning("order.var not found, resetting to 1")
+    }
+    ## would use plyr::name_rows, but want levels first
+    zz <- data.frame(level=rownames(z),z,check.names=FALSE)
+    if (reorder) {
+      ## if numeric order var, add 1 to account for level column
+      ov <- if (is.numeric(order.var)) order.var+1 else order.var
+      zz$level <- reorder(zz$level, zz[,order.var+1], FUN=identity)
+    }
+    ## Q-Q values, for each column separately
+    qq <- c(apply(z,2,function(y) {
+      qnorm(ppoints(nrow(z)))[order(order(y))]
+    }))
+    rownames(zz) <- NULL
+    pv   <- attr(z, "postVar")
+    cols <- 1:(dim(pv)[1])
+    se   <- unlist(lapply(cols, function(i) sqrt(pv[i, i, ])))
+    ## n.b.: depends on explicit column-major ordering of se/melt
+    zzz <- cbind(melt(zz,id.vars="level",value.name="estimate"),
+                 qq=qq,std.error=se)
+    ## reorder columns:
+    subset(zzz,select=c(variable, level, estimate, qq, std.error))
+  }
+  dd <- ldply(x,tmpf,.id="grp")
+  ci.val <- -qnorm((1-ci.level)/2)
+  transform(dd,
+            p=2*pnorm(-abs(estimate/std.error)), ## 2-tailed p-val
+            lb=estimate-ci.val*std.error,
+            ub=estimate+ci.val*std.error)
+}
+
+
+show_ranef <- function(data, grp, reorder = TRUE){
+  require(broom)
+  require(ggplot2)
+  data <- augment(ranef(data,condVar=TRUE))
+  if(reorder) {
+  data <- data[data$grp == grp,]
+  data$level <- as.character(data$level)
+  }
+  else {}
+  ggplot(data[data$grp == grp,],aes(estimate, level,xmin=lb,xmax=ub))+
+    geom_errorbarh(height=0)+
+    geom_vline(xintercept=0,lty=2)+
+    geom_point()+facet_wrap(~variable,scale="free_x") + 
+    ylab("Levels of the Random Effect") +
+    xlab("Estimated Intercept")
+}
+
+ranef_sd <- function(model, grp){
+  vc <- as.data.frame(VarCorr(model))
+  result <- vc$sdcor[ vc$grp == grp]
+  result <- sprintf("%.3f", round(result, 3))
+  return(result)
+}
+
+make_qi_row <- function(sims, var, lab, logit=TRUE) {
+  require(boot)
+  if(logit) {
+  a <- mean(inv.logit(sims[var == min(var), 1]))
+  b <- mean(inv.logit(sims[var == max(var), 1]))
+  c <- mean(inv.logit(sims[var == max(var), 1])) - mean(inv.logit(sims[var == min(var), 1]))
+ diffs <- inv.logit(sims[var == max(var), 1]) - inv.logit(sims[var == min(var), 1])
+  d <- sd(inv.logit(sims[var == max(var), 1])) - mean(inv.logit(sims[var == min(var), 1]))
+  e <- paste("(",sprintf("%.3f", round(quantile(diffs,0.05), 3)),
+             ",",
+                 sprintf("%.3f", round(quantile(diffs,0.95), 3)),
+             ")", sep="")
+  }
+  else {
+  a <- mean(sims[var == min(var), 1])
+  b <- mean(sims[var == max(var), 1])
+  c <- mean(sims[var == max(var), 1]) - mean(sims[var == min(var), 1])
+  diffs <- sims[var == max(var), 1] - sims[var == min(var), 1]
+
+  e <- paste("(",sprintf("%.3f", round(quantile(diffs,0.05), 3)),
+             ",",
+                 sprintf("%.3f", round(quantile(diffs,0.95), 3)),
+             ")", sep="")
+  }
+
+  
+  result <- data.frame(label=lab, x0=a, x1= b, fd=c, ci=e)
+  return(result)
+  
+}
+
+nlopt <- function(par, fn, lower, upper, control) {
+    .nloptr <<- res <- nloptr(par, fn, lb = lower, ub = upper, 
+        opts = list(algorithm = "NLOPT_LN_BOBYQA", print_level = 1,
+        maxeval = 1000, xtol_abs = 1e-6, ftol_abs = 1e-6))
+    list(par = res$solution,
+         fval = res$objective,
+         conv = if (res$status > 0) 0 else res$status,
+         message = res$message
+    )
+}
+library(nloptr)
+library(boot)
+# library(optimx)
+# library(texreg)
+
+# library(stringr)
+
+
+get_sims <- function(model, newdata, var, nsim, seed){
+  require(arm)
+  set.seed(seed)
+    arguments <- as.list(match.call())
+  modelsim <- arm::sim(model, n.sims=nsim)
+  mm.dat = model.matrix(terms(model),newdata)
+  outputfull<-NULL
+  for(i in (1:nsim)) {
+    output <- NULL
+    yi <- mm.dat %*% coef(modelsim)$fixef[i,]
+    xi<- var
+    sim<-rep(i, length (yi))
+    output<-cbind(yi, xi, sim)
+    outputfull<-rbind (outputfull, output)
+  }
+    outputfull<-as.data.frame (outputfull)
+names (outputfull)<-c("y", "x", "sim")
+  return(outputfull)
+
+}
+
+
+```
+
+```{r loaddata, eval=TRUE, echo=FALSE, cache=TRUE}
+
+Data <- read.csv("~/Dropbox/projects/etst/analysis/etst-data.csv")
+
+```
+
+```{r models1, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="asis", warning=F}
+
+M1 <- glmer(sldummy ~
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=subset(Data), family=binomial(link="logit")#
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)
+              )
+
+M2 <- glmer(ardummy ~
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data, family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)
+              )
+
+M3 <- glmer(eddummy ~
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data, family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)
+              )
+
+M4 <- glmer(hddummy ~
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data, family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)
+              )
+
+M5 <- lmer(index ~ 
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data
+            )
+
+```
+
+# Introduction
+
+When do individuals want authoritarian governments for their country? The observed successes of leaders like Alberto Fujimori in Peru and Vladimir Putin in Russia---to name just two---have raised the importance of this question. State leaders in these prominent cases engaged in power grabs and consolidations of executive authority that lacked subtlety to experienced political commentators. However, citizens in these countries clamored for these changes to executive authority and approved these leaders for their consolidation of power. Concerns of response bias do not adequately explain the high approval ratings these leaders received in domestic and cross-national public opinion polls. The extent to which citizens want and enable authoritarian governments in these cases casts doubt on the trajectory of democracy in its "third wave". Our overall knowledge of democratic legitimacy and democratic survival may require a deeper understanding of individual-level political attitudes and when individuals prefer authoritarian alternatives to democracy.
+
+The most intuitive explanations for this puzzle draw attention to contextual influences. When the economy struggles, citizens are susceptible to "escape from freedom". They prefer and support authoritarian governance in hopes that the authoritarian leader can provide economic stability and their material well-being. The other contextual influence is more societal in nature. When the societal fabric of a country is under duress, citizens are susceptible to support authoritarian political systems to provide order and prevent society from collapse.[^societal] These are intuitive explanations but notice the inferential problem. We observe the electoral successes of leaders like Fujimori and Putin and work backward to analyze the economic and societal conditions that led to their approval and success. Collinearity issues compound this inferential problem in a small number of prominent cases. Both types of threat are present simultaneously and isolating the partial effect of either on attitudes in favor of authoritarian governments is difficult.
+
+[^societal]: In this context, "societal" should not be confused with "perceived (social) threat" arguments from authoritarianism scholars in political psychology [e.g. @stenner2005tad], which focus more on perceived threats to social values (e.g. homosexuals, immigrants).
+
+This manuscript assesses the relative importance of economic indicators and societal indicators in explaining individual-level attitudes in favor of authoritarian governance. Rather than unpack noteworthy cases like Peru and Russia, I cast a wider net with an analysis of individual-level preferences for multiple forms of authoritarian governance across three waves of World Values Survey data. My mixed effects analyses of a multitude of indicators across diverse global samples show that macroeconomic indicators do better to explain individual-level attitudes for authoritarian political systems. Income inequality, in particular, shows a robust association with individual-level attitudes in favor of multiple forms of non-democratic governments, albeit not technocracy. Citizens in states under considerable societal duress are more likely to prefer army rule but do not show a support for other forms of authoritarian governance. Further, I find some intuitive macroeconomic indicators---like the consumer price index, unemployment, and economic contraction---better explain attitudes against democracy and in favor of authoritarian governments even if these indicators generally do not lead individuals to prefer a particular authoritarian alternative.
+
+The manuscript proceeds in the following fashion. First, I review the phenomenon of popular support for authoritarian political systems. I identify that our knowledge of the types of threat that are likely to bring forward this phenomenon is limited to ex post evaluations of authoritarian success stories where both economic and societal threat coincided. I then offer competing arguments to help us understand the relative importance of economic and societal threats and how either might better explain individual-level support for authoritarian governance. Thereafter, I describe the data used in the regressions to follow and offer results from a series of mixed effects models that demonstrate the effects of economic and societal threats on individual-level support for authoritarian governance. My conclusions follow. <!-- %, noting the developments of states like Peru, Russia, and Venezuela -->
+
+# Authoritarian Governance: A Familiar Problem with a New Twist
+
+The emergence of authoritarian state leaders in electoral regimes was a noteworthy event at the end of the twentieth century. Alberto Fujimori and Hugo Chávez served as hallmarks of a new movement in Latin America toward authoritarian political systems, running counter to democracy's gains in its "third wave". Their arrival in office followed widespread dissatisfaction with the existing democratic institutions, which Latin Americans at the time perceived as inefficient and incongruent with the "will of the people" [@seligson2008cdla, 5]. The extent to which citizens empowered these heads of state with considerable power to act on their discretion created a new problematic form of "delegative democracy" not seen previously [@odonnell1994dd].
+
+These state leaders enacted changes to the domestic political environment to benefit their office soon after their elections. Alberto Fujimori encountered legislative gridlock in a two-chamber Congress controlled by opposition parties just two years after his electoral upset over Mario Vargas Llosa in 1990. Fujimori issued Decree Law 25418 in response to this gridlock. This suspended the Peruvian constitution, dissolved Congress under the watchful eye of the Peruvian army, and purged the judiciary, amounting to an auto-coup by Fujimori. Six years after a failed coup attempt in 1992 that resulted in a two-year prison sentence, the newly elected Hugo Chávez called for a constitutional assembly that gave more authority to Chávez's position. The assembly empowered Chávez to unilaterally legislate on economic matters and on the treatment of marginalized groups in Venezuela. 
+
+This phenomenon is not just confined to Latin America. The beginning of this century saw first-term president Vladimir Putin work toward consolidation of his authority in a methodical manner. He first targeted the Yeltsin-era oligarchs. Oligarchs that Putin could not induce or coerce into alignment with his government became subjects of tax-evasion charges. Arrests and exile of these oligarchs allowed Putin to eliminate challenges to his authority from oligarchs like Boris Berezovsky and Mikhail Khodorkovsky, who were previously Putin supporters. The consolidation of Putin's authority continued in his first two terms with the restriction of media freedom in Russia and the consolidation of federal districts into positions supervised by Putin's appointees.
+
+These policies lacked subtlety to experienced political analysts but all three leaders were met with broad, popular approval in their respective countries. Fujimori's approval rating soared in the wake of his auto-coup, climbing from 53% approval to 81%. Minus a month in February 1994 when his approval rating was 58%, Fujimori's popularity in Peru did not fall below 60% until May 1996. He ended his first term as President in 1995 more popular than when he started in 1990 and won re-election with two-thirds of the popular vote. Chávez's power grab through his constitutional assembly was also popular. Chávez' constitutional assembly led to a new constitution that bestowed his office with the most constitutionally mandated powers since the end of military rule in 1958. Venezuelans approved this new constitution via popular referendum with 70% of the turnout in favor. Chávez won re-election the next year with 59% of the popular vote, an increase from the margin of victory in the 1998 election. Putin's approval rating for his first two terms as President of Russia was consistently above 60%, a result that is unlikely a function of some type of response bias [@treisman2011pphr]. Even when support for leaders in these prominent cases may seem endogenous to other factors like the projection of "strength" (in Putin's case) or redistributive policies (in Chávez' case), latent political attitudes receptive to authoritarian rule facilitated the acceptance of these governments.
+<!-- \citep{carrion2006fl} \citep{bellos1999nvh}, \citep{marcanotyszka2007hc} -->
+
+This phenomenon is interesting for a few reasons. Not only is this type of popular support sincere, but the proliferation of cross-national public opinion data sets gives us a glimpse into the widespread attitudes in favor of authoritarian political systems in different parts of the world. Autocracy is not a new form of government, either in South America or Eastern Europe. However, these leaders' broad popular approval and their electoral successes underscored the role individual citizens play in enabling these outcomes [@seligson2008cdla].[^bermeo] These state leaders were not just expanding their executive powers because it served their narrow interests, or because the existing democratic institutions were weak. Instead, a broad base of citizens clamored for these changes and supported the expansion of executive authority. This is an obvious concern for the maturity of nascent democratic systems. Whereas citizens demand or approve of sweeping changes to the position of state leader at the expense of checks and balances essential to an institutionalized democracy, popular support for these policies compromises democratic survival. What support we see for democracy outside the West may be "lip service" [@inglehartwelzel2005mccd]. It is an important normative and policy concern to understand the conditions that lead citizens to support broadly empowered executive authority.
+
+[^bermeo]: @bermeo2003opet offers a dissent from this perspective by arguing that ordinary citizens played, at the most, a peripheral role in democratic breakdowns in inter-war Europe. While an important insight, her analysis relies on the negligible distribution of votes for anti-democratic parties even when widespread anti-democratic sentiment was evident.
+
+## Worsening Economic Conditions or Societal Duress? The Problem of Working Backward
+
+The visible cases of leaders like Alberto Fujimori and Vladimir Putin raise the question of what enables their emergence and success. The two most accessible explanations for authoritarian political systems draw reference to the country's economic situation and a general level of conflict or duress in society. Economic crises and threats of societal upheaval lead to a convergence of popular opinion on the need for non-democratic executive authority capable of delivering security and prosperity at the leader's discretion. Both are common explanations for popular support of authoritarian rule, which we assume motivates the emergence of these political systems at the end of the twentieth century [e.g. @odonnell1994dd]. However, our knowledge of which condition provides greater leverage over the phenomenon of interest runs into a problem of collinearity in small samples. Further, our understanding is largely case-driven and informed by ex post assessments after analysts observe a successful reorganization of executive power. We observe the phenomenon and then analyze backward to understand the conditions that led to these outcomes.
+
+Take the case of Alberto Fujimori and the political science scholarship that tried to explain his success as illustrations of the inferential problem. Fujimori's arrival in office came at a time of both considerable economic duress *and* societal upheaval, the latter represented in the guerrilla groups Sendero Luminoso and MRTA. Fujimori campaigned against then-President Alan García's interventionist approach to the Peruvian economy, which experienced a record inflation of 7,649% in the election year of 1990 and the loss of a quarter of the gross domestic product in the previous three years. The powers that Fujimori gave himself to correct Peru's economic woes led to broad approval and electoral success in 1995 [@weyland2000ps]. However, Fujimori's campaigns against previous attempts at negotiation with Sendero Luminoso and MRTA in 1990 were also instrumental to his electoral victories. The more Peru fought with its rebel groups, the more Peruvians expected Fujimori to better deal with the rebels because of his ideology [@arce2003pvpa]. Higher approval ratings for his discretionary policies followed.
+
+The collinearity of economic and societal threats is a shared feature in other prominent cases. The rise of support for the Nazi Party in the Weimar Republic coincided with economic depression and the onset of work stoppages and riots in the streets. Hugo Chávez's consolidation of power in Venezuela followed a severe recession and concerns by Venezuela's minorities about mistreatment and marginalization. Russia's well-known economic troubles after the dissolution of the Soviet Union prior to Putin's emergence were concurrent with the former superpower's embarrassing inability to suppress a Chechnyan insurgency in a tiny part of its vast periphery. It is difficult to isolate the independent effects of these types of threat with ex post assessments based on observed outcomes in a handful of countries [@treisman2011pphr, 591]. Analyses of presidential approval ratings once these regimes were already consolidated do not quite capture the conditions that led to their emergence in the first place.
+
+## Assessing the Effect of Economic and Societal Threats
+
+I propose a way to disentangle the effects of economic threats and societal threats on individual-level preferences for authoritarian rule. Whereas popular interest and scholarly attention has focused on the emergence and success of authoritarian leaders in noteworthy cases, I cast a wider net. I explain individual-level *preferences* for authoritarian leadership. The same processes that should lead economic threats or societal threats to coincide with increasing popular approval of authoritarian leaders should also lead to an increase in individual-level preferences for that type of political system, all else equal.
+
+Further, I expand my sampling frame beyond well-documented cases. I use three waves of globally representative cross-national survey data and a battery of survey items that proxy individual-level preferences for authoritarian political systems. A more representative sample of the world beyond a single case study will provide greater leverage over the problem of individual-level receptiveness for authoritarian rule. Before I outline my research design later in the manuscript, I focus my attention on the neglected question of why these competing factors should matter at all for the outcome and why one might be more important than the other.
+
+# Why Should Economic Threats or Societal Turmoil Matter?
+
+Arguments that link economic and societal indicators with authoritarian sentiments have done a poor job explaining why these indicators should matter [e.g. @dotyetal1991taus; @mccann1997tt; @mccann1998eas; @mccann2008stac; @rickert1998aet]. Archival research that explores this topic selects economic indicators or societal indicators that are intuitively discrete from each other. We can classify inflation as an economic concern and violent crime rates as a societal threat without much controversy, but the mechanisms that link these indicators with support for authoritarian governments and why one should be more important than the other are not obvious. This section proposes some causal mechanisms that link these indicators to preferences for authoritarian political systems and offers arguments why one source of threat should be more important than the other.
+
+## The Complexity of the Economy and the "Escape from Freedom"
+
+Arguments that link macroeconomic indicators with preferences for authoritarian political systems start with implicit assumptions about the complexity of the economy and the confusion of the typical individual's role and agency in it. While much of the aforementioned scholarship do not belabor why worsening economic indicators should matter, most of these works offer a citation to @fromm1941ef and his seminal treatise on the roots of totalitarianism. Fromm argues that a knowledge of contemporary support for authoritarian governments requires understanding the origins of the modern economy. The breakdown of the medieval feudal system afforded individuals more liberty than they had previously. However, a new governing force---capital---replaced the traditional masters. Capital became a decisive indicator that controlled the fate of individuals. However, capital is unique for its suprapersonal nature, unlike the traditional masters. Individuals under a capitalist economic system are freer than they were previously, but are now subject to governing forces beyond their immediate reach and mostly beyond their comprehension.
+
+Modern individuals have more "negative freedom" (i.e. "freedom from") and more "positive freedom" (e.g. "freedom to") than feudal subjects. However, the suprapersonal nature of capital does not lead a total sense of agency in market participation. Fromm extends this assumption to argue most individuals know little about how the system works and what their role is in it beyond the contribution of maximum effort. This argument has aged well. Most people know little about the state of the economy and the economic forces that govern them [e.g. @walstadallgood1999wdcs; @caplan2002sbbe], a finding that is not unique to the United States [e.g. @jappelli2010el; @wobkeretal2014wdck]. The typical individual may not understand much about the market and basic economic principles that govern it, but this does not preclude an individual's market participation. Instead, a lack of basic literacy about the suprapersonal economic forces that govern market activities is more likely to lead individuals to make unsound economic decisions and support unsound economic policies at the country-level [e.g. @lusardimitchell2011flaw].
+
+The extent to which individuals make unsound economic decisions or support unsound economic policies for the state creates worsening economic conditions for the state overall. These may even compound periods of recession that are naturally occurring phenomena. Economic downturns magnify the uncertainty and alienation that individuals feel with the economy. This follows because modern economies permit individuals to act more independently than the pre-market (i.e. feudal) alternatives, which mostly fixed prices, means of production, and social status. However, this positive freedom to act deprives individuals of a sense of security that is provided by a fixed system and established authority. Individuals begin to experience more of the negative effects of this freedom, even if they may not understand its origins. For example, individuals may not understand all that underpins a high unemployment rate (e.g. supply and demand, glut of a working-age population, payroll cuts amid recession), but nonetheless understand that periods of high unemployment create uncertainty for the citizens. Individuals likewise may not understand all that contributes to the calculation of the consumer price index, though they understand that basic services cost more than they did previously.
+
+The paradox of freedom and agency is important. Citizens are freer to act independently (i.e. "positive freedom") than they were under feudal alternatives. Rather than take advantage of this positive freedom in a modern economic system, citizens will instead want to minimize its negative effects. One of these behaviors---"authortiarianism"---is well-known to scholars working on this subject. It is, in part, an individual-level submission to authority or some superior force. Citizens seek a return to something that resembles the pre-capitalist system in which their place was fixed. Periods of economic uncertainty induce citizens to seek an "escape from [the] freedom" that enabled them to try their luck in a market system in the first place. This leads to a testable hypothesis that is implicit in research that explores the link between economic downturns and authoritarian sentiments.
+
+\begin{hypothesis}
+\begin{minipage}[t]{5.1 in}
+Citizens living in states with bad economic conditions are more likely to prefer authoritarian political systems than citizens living in states with thriving economies.
+\end{minipage}
+\end{hypothesis}
+
+## Societal Threats and the Immediacy of Potential Harm
+
+Arguments that advance the primacy of societal threats also do not belabor why societal duress should lead to individual-level preferences for authoritarian political systems. One explanation can be found in a more careful reading of the previous argument. Fromm's analysis does introduce the prospect that societal conditions, including riots and work stoppages, were important in the onset of authoritarianism (i.e. Nazism, in his case). However, this macrohistorical analysis starts with the emergence of global capitalism and the dissolution of the feudal economic order. Observed societal violence comes after the end of feudalism and the fixed social status. Arguments about the importance of societal turmoil see the reverse process. The maintenance of societal order permits economic transactions in the first place. This makes a secure society ruled by a stable government a higher priority than the economic activities that follow from it. It also makes threats to a stable government and society a greater priority as well.
+
+None of the aforementioned scholarship explicitly connects Thomas Hobbes with societal threat arguments. Yet, Hobbes' thought experiment about the state of nature pervades our intuition about the relationship between societal threats and authoritarianism even as scholars are not explicit about the connection. His seminal thought experiment is so ubiquitous with broader philosophical arguments about societal order that the problem of order is even sometimes called a "Hobbesian problem" [@wrong1994po]. 
+
+It is easy to misread Thomas Hobbes or give his works a narrow reading [@curley1994l], but his thought experiment about the conditions of individuals in the state of nature can be faithfully summarized as follows. Absent a government capable of regulating conduct, there will be enough violence, or fear of violence, that the conditions of individuals approximate a "state of nature" in which life is intolerable. Individuals are not completely asocial, nor necessarily irrational. However, they are driven first by fear of their own mortality, which is exacerbated when there is no sovereign government capable of regulating conduct. Since individuals possess relatively equal faculties in the state of nature, they are driven to conflict over competition for scarce resources, mistrust of the intention of others, and a concern for reputation and glory. The egoistic, even violent, behavior of individuals that follows makes everyone's life worse in the state of nature. This is the foundation for Hobbes' famous quote of the "poor, nasty, brutish, and short" quality of life without a stable government. For Hobbes, individuals should seek a "leviathan" to provide societal order and, importantly, enforce contracts that may facilitate regular economic activities. Even a leviathan broadly empowered to "overawe them all" is better than the alternative Hobbes describes.
+
+Terror management theory [e.g. @landauetal2004due] builds on this argument about the primacy of mortality concerns and direct threats to physical well-being. Scholars in this vein argue that mortality concerns prompt individuals to construct cognitive orientations and belief systems that, when threatened, invoke a vigorous defense from individuals. One of these defense mechanisms involves the search for a powerful authority, like a head of state, to help individuals manage a fear of their own mortality. Terror management theory privileges the importance of "directness" of the threat in question. The more direct the threat is to the physical existence of the individual, the more it prompts a sense of mortality that citizens offset by broadly empowering authority to provide for their security. In this context, economic security is less "direct" than physical security threats and, more often than not, can be better understood as a frustration by comparison.
+
+The process by which societal threats lead to preferences for authoritarian rule is similar to the mechanisms that link economic conditions to preferences for authoritarian rule. Individuals sense a threat to themselves, though the nature of the threat is more immediate, direct, and physical than suprapersonal and alienating. Societal turmoil threatens to devolve a country into chaos, which comes with no guarantee of protection from physical harm. Authoritarian sentiments and behaviors emerge under these changing social conditions, which scholarship on right-wing authoritarianism also suggests [e.g. @altemeyer1988ef; @duckittfisher2003ist]. Citizens look to submit to all-powerful authority in order to rise above their natural states and behaviors observed without a societal order in place.
+
+\begin{hypothesis}
+\begin{minipage}[t]{5.1 in}
+Citizens living in states with high levels of societal turmoil are more likely to prefer authoritarian governments than those living in states with low levels of societal turmoil. 
+\end{minipage}
+\end{hypothesis}
+
+# Research Design
+
+I outline my research design for how I will assess the effect of economic threats and societal threats on preferences for authoritarian political systems in this section. My design utilizes three waves of World Values Survey data and multiple economic and societal indicators from a diverse array of sources. The supplemental appendix contains additional information about summary statistics, the countries and years that appear in the analysis, and the imputation procedure I mention in this section.
+
+## Dependent Variables
+
+I take the third, fourth, and fifth waves of World Values Survey (WVS) data as my sample of individual-level attitudes across the world and use five dependent variables in the analyses that follow. These three waves of WVS data have four questions regarding a respondent's preferences for the political system of his or her country. One question gauges attitudes about a hypothetical political system in which a "strong leader who does not have to bother with parliament and elections" rules by discretion. Another question asks about having a political system in which the army rules. The third question in this battery gauges attitudes toward a technocratic political system in which "experts" make policy decisions in lieu of a government. The final question used here asks about having a democratic political system, framing the question as support of democracy or an acceptance of an unspecified non-democratic alternative. The respondent answers on a four-point ordinal scale from "very good" to "very bad" regarding that type of political system for governing the respondent's country. Recent scholarship suggests this battery of items that regularly appear in WVS surveys captures a scale of preferences from democracy to autocracy [e.g. @arielydavidov2011cwr].
+
+I condense these four questions into dummy variables for four of the empirical tests provided in the next section. This recoded dependent variable takes on a value of 1 if the respondent believes a strong leader or army rule is "very good" or "fairly good". For the analyses on having a democratic system, the dependent variable assumes a value of 1 if the respondent believes having a democratic political system is "fairly bad" or "very bad". I do this to allow the reader to beter evaluate coefficients across the regression tables.
+
+The fifth dependent variable is an estimated index of support for non-democracy that I derive from an item response model of the four survey items that comprise the four other dependent variables. This approach squares with the factor analytic approach that @arielydavidov2011cwr use in their analysis. The estimation procedure itself resembles the "graded response model" first proposed by @samejima1969ela and used prominently in the Unified Democracy Scores (UDS) [@pemsteinetal2010dc]. The latent trait estimates derived from the graded response model follow a normal distribution with a mean that approaches zero and a standard deviation of the distribution that approaches 1.
+
+## An Index Approach to Economic and Societal Threats
+
+I choose to code my proxies of economic threats and societal threats as indices of composite indicators. <!-- My rationale is largely practical. In small macro-level (i.e. "country-level") multi-level models, linear combinations of macro-level predictors can lead to problems of quasi-separation in estimating the statistical model. This issue is similar to the overall problem of collinearity. Indices are a useful solution to this problem. -->
+
+My economic threat index consists of five macroeconomic indicators. The first macroeconomic indicator is the real gross domestic product (GDP) per capita of the country in the year prior to the WVS survey year. By itself, this variable assesses whether preferences for varying forms of authoritarian rule is attributable to differences between rich countries and poor countries and that national poverty relative to other countries is itself a form of an economic threat. The second macroeconomic indicator is the five-year difference in GDP per capita in the year prior to the survey year. This proxies whether losses in national wealth relative to a recent reference point lead to preferences for authoritarian governments, an indicator of interest toward explaining Alberto Fujimori's emergence and success. The third macroeconomic indicator is the national unemployment rate in the year prior to the country year. The fourth macroeconomic indicator is the natural logarithmic transformation of the consumer price index in the year prior to the survey year. The final macroeconomic indicator is the estimated level of income inequality in the year prior to the survey year. Higher income disparities between rich and poor suggest more threatening economic conditions. This variable comes from the Standardized World Income Inequality Database [@solt2013swiid]. The GDP data come from an extension of Penn World Table data. All other data come from the World Bank.
+
+My societal threat index consists of four indicators. The first is a transformed five-year average of the weighted conflict index in the Cross-National Time-Series (CNTS) Data Archive [@banks2013cnts]. This index created by Banks consists of the number of assassinations, worker strikes, instances of guerrilla warfare, the number of government crises, government purges, riots, revolutions, and anti-government demonstrations. The second societal threat indicator comes from the UCDP/PRIO Armed Conflict Dataset [@themnerwallensteen2012ac], from which I create a binary indicator marking the onset of an intra-state armed conflict resulting in at least 25 battle deaths in the five years prior to the survey year. States with large segments of the population subject to systemic discrimination are also more likely to be states with higher degrees of societal threat, much like the case of Venezuela. I use the Ethnic Power Relations data set [@wimmeretal2009epac] and code the percentage of citizens in the state that are subject to widespread political discrimination. My final measure of societal threat proxies unstable political institutions, which the case study literature suggests coincides with emerging authoritarian governments and their popular approval when combined with changing diversity in political attitudes between left and right. I code political instability as the multiplicative interaction between the four-part political legitimacy variable from the *State Fragility Index* [@cfsp2014sfi] and the variance of the estimated range of ideology from the WVS data for the country in that year. Higher values indicate a greater illegitimacy of the regime that cannot count on voluntary compliance with its policy and a greater diversity of political attitudes that could challenge the regime.
+
+I construct the indices in the following manner. First, I invert each indicator, if necessary, so that higher values in the indicator consistently coincide with greater economic or societal threat. I then scale each relevant index indicator, add them together and finally average them to create the composite index that I use to estimate the models provided in the regression tables in this manuscript.<!-- I center these indices on the survey wave and scale them by two standard deviations. @gelman2008sri advocates scaling all non-binary predictors by two standard deviations to provide a rough comparison of coefficient size for binary and non-binary predictors. -->
+
+## Control Variables
+
+I incorporate several micro-level controls from the WVS data, including basic age and gender controls. Age is an interval measure. The gender control is a dummy variable for women.
+
+Scholars interested in support for authoritarian governments place emphasis on individual-level socioeconomic factors [e.g. @lipset1959dwca]. I proxy these factors with an assortment of individual-level variables. I code two dummy variables for whether the respondent has completed a college education and whether the respondent is momentarily unemployed. I include two variables that proxy income in different ways, each on a 10-point scale. These variable are how satisfied the respondent is with his or her financial situation and where the respondent places his or her income in deciles from bottom to top. My final socioeconomic variable is the five-part subjective social class variable, which ranges from "lower class" to "upper class".
+
+The next two variables concern political interest and a sense of personal efficacy. @norris2011dd finds that citizens with greater interest in politics are more likely to have greater aspirations for democracy. I include the four-part interest in politics measure from WVS, which ranges from "not at all interested" to "very interested". Classic authoritarianism scholarship in psychology [e.g. @adornoetal1950tap; @altemeyer1988ef] and especially @fromm1941ef also highlight how submission to authority coincides with an individual's feeling of powerlessness or lack of control over life events. I include a measure for this from the WVS question that asks respondents how much free choice and control they feel they have over their lives. This is ten-point response that ranges from "none at all" to a "great deal".
+
+The final micro-level variables proxy political and life values. I include the self-placement of ideology of the respondent on a ten-point left-right scale. Those further to the ideological right should be more likely to prefer authoritarian governance. I include the emancipative values measure first proposed by @welzel2013fr. This variable consists of four components that proxy values of "autonomy" (related to the well-known child autonomy index), "choice" (i.e. the justifiability of certain social behaviors that may seem taboo), "equality" (between men and women on the job, in politics, and in educational opportunities), and "voice" (i.e. whether political priorities should entail more citizen input into how the country is governed). I also include an earlier set of "traditional values" that @inglehartbaker2000mcc found to cluster in areas where authoritarian governments were more entrenched. The five variables include the justifiability of abortion, importance of God, respect for authority, child autonomy index, and national pride. They also proxy recent arguments from Duckitt and his colleagues [e.g. @duckittetal2010tar] that traditional values are separable from other "authoritarian" attitudes.[^emanctrad]
+
+[^emanctrad]: The emancipative values and traditional values share a few indicators (e.g. the justifiability of abortion and two elements of the four-item child autonomy index). However, the correlation between both variables is modest (*r* = `r with(Data, sprintf("%.3f", round(cor(z_emanc, z_tradv), 3)))`), which suggests both variables capture different concepts of "emancipative" values and "traditional" values. The appendix contains a full correlation matrix.
+
+I also include three country-year-level (i.e. macro-level) control variables. I code the level of democracy in the country in the year prior to the survey year with a graded response model [@samejima1969ela] of latent traits of democracy. @pemsteinetal2010dc first popularized this approach to measuring democracy, though the data I use comes from a recent extension of this approach into the present and the distant past [@marquez2016qme]. I use this same data to derive a "democratic stock" variable akin to the @gerringetal2012dhd measure. Whereas @gerringetal2012dhd treat democracy as a "stock" after which the value depreciates after a chosen referent year (i.e. 1900 in their case), I conceptualize the level of democracy as a stock that compounds 1% interest each year with successive "deposits" (i.e. continued democracy).<!--[^usaven]--> The distribution of this variable is also normal with a mean that approaches zero, though the tails are longer for long-running continuous democracies (e.g. Switzerland, the United States) and countries with long autocratic traditions (e.g. Russia).
+
+<!--[^usaven]: Compare the United States (1995) and Venezuela (1996) to understand the intuition here. The U.S.' estimate of democracy is 1.518, which is not even a standard deviation above Venezuela's estimate of democracy (1.027) in 1996. Polity data would agree since the U.S. scores a perfect 10 in 1995 while Venezuela scores at 8 in 1996; both qualify as democracies. However, the U.S. democratic stock in 1995 is 610.256 while Venezuela's democratic stock in 1996 is -21.549. The U.S. is arguably the longest-running continuous democracy in the world while Venezuela, though democratic in 1996, had a long history of authoritarian governments.-->
+
+My final macro-level control variable is a latent estimate of territorial threat for a country in a given survey year. @miller2016ieea argues that countries subject to external threat, especially territorial revision, have citizens who prefer these kinds of state executives capable of acting on discretion to provide for their territorial security. He uses the same "strong leaders" question as his dependent variable that I include here. I use a similar estimation approach outlined in that manuscript and its appendix and extend the data to provide estimates for countries that appear in the fifth wave of WVS data. I include detailed information about this approach in the appendix accompanying this manuscript.
+
+## The Statistical Model and Missing Data
+
+The first four models analyze binary dependent variables, making a logistic transformation of the coefficients appropriate. The dependent variable for the fifth model is continuous and normal, for which I estimate a linear mixed model. All non-binary independent variables in the model are scaled by two standard deviations. @gelman2008sri advocates scaling by two standard deviations to allow for a rough comparison of coefficients for binary and non-binary variables.
+
+The data cluster in natural ways that I incorporate as random effects in a mixed effects model. There is spatial heterogeneity (i.e. differences between countries as diverse as Andorra and Zimbabwe) and temporal heterogeneity (i.e. difference between points in time and within countries over time). I follow recent advice from @schmidtcatranfairbrother2015remm and estimate all potentially relevant random effects. These include random effects for countries, country-years (i.e. differences between years in the same country), and years. <!-- offered in a special issue on mixed effects models in the *European Sociological Review*-->
+
+This estimation choice addresses the extent of unit heterogeneity in the data. Yet, it raises a corollary issue of interpretation given the conservative nature of the statistical estimation procedure. There are over 200,000 individual-level observations, but `r sapply(ranef(M1),nrow)["country:year"]` country-years, `r sapply(ranef(M1),nrow)["country"]` individual countries, and `r sapply(ranef(M1),nrow)["year"]` individual survey years. The degrees of freedom for the macro-level predictors are much smaller than the degrees of freedom for the micro-level predictors in what amounts to a conservative test of these arguments. Therefore, I apply the conventional *p* < .05 cut-off to evaluate the micro-level coefficients and use the cut-off of *p* < .10 for the coefficients at the macro-level. Though I adopt this convention, most of the results in the macro-level in the regressions I provide are also significant at the .05 level.
+
+Finally, I dealt with the issue of missing data. Listwise deletion of missing values in the data set would still result in an analysis with over 90,000 observations. Missingness, however, is relative to the original data frame, which contains over 200,000 observations. This raises issues of both inefficiency and bias. I choose a novel approach to deal with missing data. I follow @hollenbachetal2014fei, who themselves extend @hoff2007erl, with an approach to imputation that uses Gaussian copulas. @hollenbachetal2014fei find this approach to imputation is computationally faster than Amelia or multiple imputation via chained equations (MICE). They also find its performance in correctly imputing missing values given a known data-generating process is better than MICE and as good as Amelia. <!-- [@blackwelletal2015uame] [@vanbuurengroothuis2011mice] -->
+
+# Results
+
+Table 1 shows the results of the first set of analyses, which includes just the macro-level fixed effects. The analyses suggest that worsening economic conditions have a more robust association with preferences for different forms of autocracy than worsening societal conditions.
+
+```{r maketable1, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="hide", message=F, warning=F}
+
+Table1 <- stargazer(M1, M2, M3, M4, M5, 
+                   style="ajps", header=FALSE,
+                   title="Macro-level Mixed Effects Models of Preferences for Non-Democratic Political Systems",
+                   omit=c("Constant"), model.names=FALSE, dep.var.labels.include = FALSE,
+                   omit.stat=c("aic","bic", "ll"), digit.separator=",",
+                   covariate.labels=c("Economic Threat Index", "Societal Threat Index",
+                                      "Level of Democracy", "Democratic Stock",
+                                      "Level of Territorial Threat"),
+                   notes=c("$\\dagger$ p < 0.10 (Macro-level)"),
+                   star.cutoffs = c(.1, .1, .1), star.char = c("\\dagger", "\\dagger", "\\dagger"),
+                   font.size="small"
+)
+
+Table1 <- Table1[-22] 
+
+modelnames <- c("\\\\[-1.8ex] & \\emph{Strong} & \\emph{Army} &  & \\emph{Democracy} & \\\\", "\\\\[-1.8ex] & \\emph{Leader} & \\emph{Rule} & \\emph{Technocracy} & \\emph{is Bad} & \\emph{Index}\\\\ ")
+
+Table1 <- c(Table1[a <- 1:7], modelnames, Table1[-a])
+
+randomeffect <- "{\\bf Random Effect} & & & & & \\\\"
+microlevel <- "{\\bf Micro-level} & & & & & \\\\"
+macrolevel <- "{\\bf Macro-level} & & & & & \\\\"
+hline <- "\\hline"
+newline <- "\\\\"
+
+row.sd.country <- paste("Country Standard Deviation & ", 
+                               ranef_sd(M1, "country"), "&", 
+                           ranef_sd(M2, "country"), "&",
+                           ranef_sd(M3, "country"), "&",
+                           ranef_sd(M4, "country"), "&",
+                           ranef_sd(M5, "country"), "\\\\")
+
+row.n.country <- paste("\\# of Countries &",
+                         sapply(ranef(M1),nrow)["country"], "&", 
+                         sapply(ranef(M2),nrow)["country"], "&",
+                         sapply(ranef(M3),nrow)["country"], "&",
+                         sapply(ranef(M4),nrow)["country"], "&",
+                         sapply(ranef(M5),nrow)["country"], "\\\\")
+
+row.sd.countryyear <- paste("Country-Year Standard Deviation & ", 
+                               ranef_sd(M1, "country:year"), "&", 
+                           ranef_sd(M2, "country:year"), "&",
+                           ranef_sd(M3, "country:year"), "&",
+                           ranef_sd(M4, "country:year"), "&",
+                           ranef_sd(M5, "country:year"), "\\\\")
+
+row.n.countryyear <- paste("\\# of Country-Years &",
+                         sapply(ranef(M1),nrow)["country:year"], "&", 
+                         sapply(ranef(M2),nrow)["country:year"], "&",
+                         sapply(ranef(M3),nrow)["country:year"], "&",
+                         sapply(ranef(M4),nrow)["country:year"], "&",
+                         sapply(ranef(M5),nrow)["country:year"], "\\\\")
+
+row.sd.year <- paste("Year Standard Deviation & ", 
+                               ranef_sd(M1, "year"), "&", 
+                           ranef_sd(M2, "year"), "&",
+                           ranef_sd(M3, "year"), "&",
+                           ranef_sd(M4, "year"), "&",
+                           ranef_sd(M5, "year"), "\\\\")
+
+row.n.year <- paste("\\# of Years &",
+                         sapply(ranef(M1),nrow)["year"], "&", 
+                         sapply(ranef(M2),nrow)["year"], "&",
+                         sapply(ranef(M3),nrow)["year"], "&",
+                         sapply(ranef(M4),nrow)["year"], "&",
+                         sapply(ranef(M5),nrow)["year"], "\\\\")
+
+insertres <- c(hline, randomeffect, hline, row.n.country, row.sd.country,
+                 newline, row.n.countryyear, row.sd.countryyear,
+                 newline, row.n.year, row.sd.year, hline)
+
+Table1 <- c(Table1[a <- 1:21], insertres, Table1[-a])
+
+
+```
+
+```{r displaytable1, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=FALSE, results="asis", message=F, warning=F}
+cat(Table1, sep='\n') 
+```
+
+
+The parameter for the economic threat index is positive and statistically significant in four of the five models in Table 1. An increase in economic threat coincides with increasing support for strong leaders capable of ruling by discretion, an increase in support for rule of government by the military, a greater belief that having a democracy is bad for the respondent's country, and greater support for the latent preferences against democracy in the index measure. The societal threat index does not perform as well by comparison. Worsening societal conditions only coincide with an increase in support for rule of government by the army.
+
+The parameters for the three macro-level control variables tell conflicting stories about preferences for different forms of autocratic governments. The parameter for the territorial threat measure in Model 1 replicates @miller2016ieea and finds a positive and statistically significant association with territorial threat and preferences for rule of government by a strong leader without interference from regular elections or legislative checks and balances. The effect of territorial threat, however, is negative in the second model that estimates support for rule of government by the army. This is an unintuitive finding given the outsized role the military plays in providing for the territorial security citizens want under these conditions, but it would be consistent with some peculiar countries that routinely appear in the WVS data. Pakistan, most prominently, is a country in which preferences for a strong leader is routinely high relative to the rest of the world and greater than preferences for rule of government by an army that consistently loses skirmishes to its territorial rival, India.
+
+The two parameters for democracy show inconsistent effects as well. The level of democracy prior to the survey year depresses support for rule of government by the army and rule by technocrats in lieu of government. However, the parameter for the level of democracy is positive and statistically significant in the model that estimates beliefs that democracy is bad for the respondent's country. Citizens in more democratic countries appear to hold ambiguous attitudes about democratic governance. The parameter for the democratic stock measure is indistinguishable from zero in the three of the four models that comprise the latent index measure, but is negative and statistically significant in the fifth model that estimates latent attitudes against democracy.[^demdec]
+
+[^demdec]: The appendix has a model in which the democratic stock measure is condensed to deciles and treated as a random effect. The caterpillar plots for this random effect do well to illustrate the heterogeneity among these countries and the attitudes of their citizens toward autocratic governance.
+
+```{r models2, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="asis"}
+
+
+M6 <- glmer(sldummy ~
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart + 
+              (1  | country) + (1 | country:year) + (1 | year),
+            data=subset(Data), family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)       
+            )
+
+M7 <- glmer(ardummy ~  
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data, family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)       
+            )
+
+M8 <- glmer(eddummy ~  
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data, family=binomial(link="logit") 
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)            
+
+            )
+
+M9 <- glmer(hddummy ~
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data, family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE) 
+            )
+
+M10 <- lmer(index ~ 
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data
+            
+            )
+```
+
+```{r maketable2, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="hide", message=F, warning=F}
+
+Table2 <- stargazer(M6, M7, M8, M9, M10, 
+                   style="ajps", header=FALSE,
+                   title="Multi-level Models of Preferences for Non-Democratic Political Systems",
+                   covariate.labels=c("Age", "College Education",
+                                      "Emancipative Values",
+                                      "Female", "Financial Satisfaction",
+                                      "Household Income", "Ideology (L to R)",
+                                      "Personal Efficacy",
+                                      "Political Interest",
+                                      "Social Class", "Traditional Values", "Unemployed",
+                                      "Economic Threat Index", "Societal Threat Index",
+                                      "Level of Democracy", "Democratic Stock",
+                                      "Level of Territorial Threat"),
+                   omit=c("Constant"), model.names=FALSE, dep.var.labels.include = FALSE,
+                   omit.stat=c("aic","bic", "ll"), digit.separator=",",
+                   notes=c("* $p$ < 0.05 (Micro-level), $\\dagger$ p < 0.10 (Macro-level)"),
+                   star.cutoffs = c(.1, .05, .05), star.char = c("\\dagger", "*", "*"),
+                   font.size="small")
+
+Table2 <- Table2[-46]
+Table2[8] <- "\\\\[-1.8ex] & \\textbf{Model 6} & \\textbf{Model 7} & \\textbf{Model 8} & \\textbf{Model 9} & \\textbf{Model 10}\\\\ " 
+
+for(i in c(34:43)){
+  Table2[i] <-gsub("[*]", "\\\\dagger", Table2[i])
+}
+
+for(i in c(10:33)){
+  Table2[i] <- gsub("\\$\\^\\{\\\\dagger.\\$", "", Table2[i])
+}
+
+# Table[8] <- gsub("textbf", "emph", Table[8])
+
+# modelnames <- c("\\\\[-1.8ex] & \\emph{Strong} & \\emph{Army} &  & \\emph{Democracy} & \\\\", "\\\\[-1.8ex] & \\emph{Leader} & \\emph{Rule} & \\emph{Technocracy} & \\emph{is Bad} & \\emph{Index}\\\\ ")
+Table2 <- c(Table2[a <- 1:7], modelnames, Table2[-a])
+
+
+
+row.sd.country <- paste("Country Standard Deviation & ", 
+                               ranef_sd(M6, "country"), "&", 
+                            ranef_sd(M7, "country"), "&",
+                            ranef_sd(M8, "country"), "&",
+                            ranef_sd(M9, "country"), "&",
+                            ranef_sd(M10, "country"), "\\\\")
+
+row.n.country <- paste("\\# of Countries &",
+                         sapply(ranef(M6),nrow)["country"], "&", 
+                         sapply(ranef(M7),nrow)["country"], "&",
+                         sapply(ranef(M8),nrow)["country"], "&",
+                         sapply(ranef(M9),nrow)["country"], "&",
+                         sapply(ranef(M10),nrow)["country"], "\\\\")
+
+row.sd.countryyear <- paste("Country-Year Standard Deviation & ", 
+                               ranef_sd(M6, "country:year"), "&", 
+                           ranef_sd(M7, "country:year"), "&",
+                           ranef_sd(M8, "country:year"), "&",
+                           ranef_sd(M9, "country:year"), "&",
+                           ranef_sd(M10, "country:year"), "\\\\")
+
+row.n.countryyear <- paste("\\# of Country-Years &",
+                         sapply(ranef(M6),nrow)["country:year"], "&", 
+                         sapply(ranef(M7),nrow)["country:year"], "&",
+                         sapply(ranef(M8),nrow)["country:year"], "&",
+                         sapply(ranef(M9),nrow)["country:year"], "&",
+                         sapply(ranef(M10),nrow)["country:year"], "\\\\")
+
+row.sd.year <- paste("Year Standard Deviation & ", 
+                               ranef_sd(M6, "year"), "&", 
+                           ranef_sd(M7, "year"), "&",
+                           ranef_sd(M8, "year"), "&",
+                           ranef_sd(M9, "year"), "&",
+                           ranef_sd(M10, "year"), "\\\\")
+
+row.n.year <- paste("\\# of Years &",
+                         sapply(ranef(M6),nrow)["year"], "&", 
+                         sapply(ranef(M7),nrow)["year"], "&",
+                         sapply(ranef(M8),nrow)["year"], "&",
+                         sapply(ranef(M9),nrow)["year"], "&",
+                         sapply(ranef(M10),nrow)["year"], "\\\\")
+
+insertres <- c(hline, randomeffect, hline, row.n.country, row.sd.country,
+                 newline, row.n.countryyear, row.sd.countryyear,
+                 newline, row.n.year, row.sd.year, hline)
+
+Table2 <- c(Table2[a <- 1:45], insertres, Table2[-a])
+Table2 <- c(Table2[a <- 1:35], macrolevel, Table2[-a])
+Table2 <- c(Table2[a <- 1:11], microlevel, Table2[-a])
+
+```
+
+```{r displaytable2, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=FALSE, results="asis", message=F, warning=F}
+cat(Table2, sep='\n')
+
+```
+
+Table 2 incorporates the micro-level (i.e. individual-level) fixed effects. Some of these micro-level factors have strong effects on attitudes toward autocratic political systems.
+
+The parameter for emancipative values is easily the most precise of any fixed effect in the models I estimate and one of the most robust effects. Its estimated effect size is also among the largest. An increase in emancipate values consistently leads to decreases in preferences for rule of government by strong leaders with discretionary authority, the army, or technocrats. Citizens that score higher in emancipative values are also less likely to believe that having democracy is bad for the citizen's country. Emancipative values also depress latent sentiments in favor of autocracy in Model 10.[^emanc]
+
+[^emanc]: The appendix shows the other peculiar effects that this emancipative values measure has on some of the other parameters in the model.
+
+Only three other micro-level variables have consistent effects across all five models in Table 2. The college educated are less likely to prefer autocratic alternatives to democracy across all models. Those that score higher in income are also less likely to prefer autocratic alternatives to democracy. The unemployed are also likely to prefer all forms of autocracy I estimate in Table 2. This provides important evidence in favor of arguments that link support for autocracy to lower levels of education and economic status.
+
+The remaining parameters have inconsistent effects that merit further discussion. Consider that the parameters for college education and income are negative and statistically significant across all five models in Table 2. The unemployment variable is positive and significant in all five models, consistent with conventional wisdom about the effect of socioeconomic status. However, the parameters for increasing social class and the respondent's satisfaction with his or her financial situation is *positive* and discernible from zero in four of the five models. Respondents that place themselves in higher social classes are more likely to prefer strong leaders, army rule, technocracy, and are more likely to hold latent attitudes in favor of autocracy when income and education are held constant. Respondents in higher social classes are only less likely to think democracy is bad for their country. Likewise, respondents that are more satisfied with their financial situation are more likely to prefer all autocratic alternatives to democracy except technocracy. This suggests interesting heterogeneity in attitudes toward democracy as a function of socioeconomic status that classic scholarship may have missed.[^class]
+
+[^class]: The appendix contains additional models that unpack the heterogeneity in attitudes toward autocracy as a function of social class.
+
+Other political attitudes I proxy in Table 2 do not have the same robust effects as the emancipative values measure. Respondents further to the ideological right are more likely to prefer autocratic alternatives to democracy but, curiously, respondents further to the ideological right are less likely to reject democracy as bad for the respondent's own country. The "traditional values" parameter also has inconsistent effects. Those that score higher in traditional values are less likely to prefer autocratic alternatives to democracy in all but Model 7, in which higher levels of traditional values coincides with greater preferences for army rule. Political interest has a similar effect. Those with greater interest in politics tend to be more "critical" citizens who expect greater levels of democracy from their government [@norris2011dd], but greater political interest also coincides with more openness to army rule. A greater sense of personal efficacy has inconsistent effects across the five models in Table 2. Those with a greater sense of personal efficacy are less likely to prefer army rule and are less likely to consider democracy as "bad" for their country, though there is no effect of personal efficacy on attitudes toward strong leaders and technocracy.
+
+Table 2 shows interesting heterogeneity among individual-level attributes and preferences in favor of autocratic governance. Do note that the effect of the macro-level variables are unchanged by the inclusion of micro-level variables. The results from Table 2 affirm the findings from Table 1 and suggest that worsening economic indicators, not increasing societal turmoil, drive individual-level preferences for authoritarian political systems.
+
+Table 3 provides quantities of interest from Table 2. I set each control variable at its average or typical value for all five models in Table 2.[^median] I then set each statistically significant threat index from Table 2 at -.5 and .5, which will estimate the first difference of a threat index for a move from a standard deviation below the mean to a standard deviation above the mean. I run 1,000 simulations from a multivariate normal distribution and summarize the results as quantities of interest. These expected values are akin to probabilities for all but the index model. The index estimate of latent attitudes in favor of autocracy is continuous and normally distributed with a mean of zero and a standard deviation that approaches one.
+
+[^median]: Three micro-level control variables are binary, for which I use the median. This means the comparison is a working woman without a college education with the average age, socioeconomic conditions, political attitudes and values, and under the average territorial threat and regime type.
+
+```{r getsims, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="hide"}
+
+newdata <- with(Data, 
+                data.frame(sldummy=0, z_age=0, collegeed=median(collegeed), z_emanc=0,
+                           female=median(female), z_satisf=0, z_inc=0, z_ideo=0,
+                           z_agency=0, z_intp=0, z_class=0, z_tradv=0, 
+                           unemployed=median(unemployed),
+                           z_eti=c(-.5, .5), z_sti=0, z_demest=0,  z_demstock=0,
+                           z_ptart=0, country=0, "country:year"=0, year=0)
+                )
+
+
+M6sims <- get_sims(M6, newdata, newdata$z_eti, 1000, 8675309)
+
+slrow <- make_qi_row(M6sims, M6sims$x, "Strong Leaders (E)")
+
+# Army rule (ETI)
+
+newdata <- with(Data, 
+                data.frame(ardummy=0, z_age=0, collegeed=median(collegeed), z_emanc=0,
+                           female=median(female), z_satisf=0, z_inc=0, z_ideo=0,
+                           z_agency=0, z_intp=0, z_class=0, z_tradv=0, 
+                           unemployed=median(unemployed),
+                           z_eti=c(-.5, .5), z_sti=0, z_demest=0,  z_demstock=0,
+                           z_ptart=0, country=0, "country:year"=0, year=0)
+                )
+
+M7simse <- get_sims(M7, newdata, newdata$z_eti, 1000, 8675309)
+
+arrow1 <- make_qi_row(M7simse, M7simse$x, "Army Rule (E)")
+
+
+# Army rule (STI)
+
+newdata <- with(Data, 
+                data.frame(ardummy=0, z_age=0, collegeed=median(collegeed), z_emanc=0,
+                           female=median(female), z_satisf=0, z_inc=0, z_ideo=0,
+                           z_agency=0, z_intp=0, z_class=0, z_tradv=0, 
+                           unemployed=median(unemployed),
+                           z_sti=c(-.5, .5), z_eti=0, z_demest=0,  z_demstock=0,
+                           z_ptart=0, country=0, "country:year"=0, year=0)
+                )
+
+M7simss <- get_sims(M7, newdata, newdata$z_sti, 1000, 8675309)
+
+arrow2 <- make_qi_row(M7simss, M7simss$x, "Army Rule (S)")
+
+# Have Dem (ETI)
+
+newdata <- with(Data, 
+                data.frame(hddummy=0, z_age=0, collegeed=median(collegeed), z_emanc=0,
+                           female=median(female), z_satisf=0, z_inc=0, z_ideo=0,
+                           z_agency=0, z_intp=0, z_class=0, z_tradv=0, 
+                           unemployed=median(unemployed),
+                           z_eti=c(-.5, .5), z_sti=0, z_demest=0,  z_demstock=0,
+                           z_ptart=0, country=0, "country:year"=0, year=0)
+                )
+
+M9sims <- get_sims(M9, newdata, newdata$z_eti, 1000, 8675309)
+
+hdrow <- make_qi_row(M9sims, M9sims$x, "Democracy is Bad (E)")
+
+# Index
+
+newdata <- with(Data, 
+                data.frame(index=0, z_age=0, collegeed=median(collegeed), z_emanc=0,
+                           female=median(female), z_satisf=0, z_inc=0, z_ideo=0,
+                           z_agency=0, z_intp=0, z_class=0, z_tradv=0, 
+                           unemployed=median(unemployed),
+                           z_eti=c(-.5, .5), z_sti=0, z_demest=0,  z_demstock=0,
+                           z_ptart=0, country=0, "country:year"=0, year=0)
+                )
+
+M10sims <- get_sims(M10, newdata, newdata$z_eti, 1000, 8675309)
+
+inrow <- make_qi_row(M10sims, M10sims$x, "Index (E)", logit=FALSE)
+
+Table3 <- rbind(slrow, arrow1, arrow2, hdrow, inrow)
+
+Table3s <- stargazer(Table3, type = "latex",
+          summary = FALSE, rownames = FALSE, header=FALSE,
+          title="Quantities of Interest from Table 2",
+          initial.zero = FALSE,
+          notes = c("\\footnotesize{(E) = first differences in economic threat index.}",
+                    "\\footnotesize{(S) = first differences in societal threat index.}")
+)
+
+```
+
+```{r displaytable3, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=FALSE, results="asis"}
+
+Table3s[5] <- "\\begin{tabular}{@{\\extracolsep{5pt}} lcccc} "
+Table3s[8] <- "\\textbf{Model} & \\textbf{x = -.5} & \\textbf{x = .5} & \\textbf{in E(Y)} & \\textbf{Interval} \\\\ "
+
+Table3s <- c(Table3s[a <- 1:7], " & \\textbf{E(Y)} & \\textbf{E(Y)} & \\textbf{First Difference} & \\textbf{90\\% Confidence} \\\\ ", Table3s[-a])
+
+for(i in c(17:18)){
+  Table3s[i] <- paste0(Table3s[i], "[-1mm]")
+}
+ 
+cat(Table3s, sep='\n')  
+
+```
+
+
+The information conveyed in Table 3 gives a better sense of substantive effect than the regression summaries. The effect of an increase from a standard deviation below the mean to a standard deviation above the mean in economic threat coincides with a predicted probability increase of `r round(slrow$fd,3)` in preference for a strong leader unhindered by an independent legislature or elections. This first difference coincides with an `r paste(round(with(slrow, fd/x0)*100, 2),"%",sep="")` increase from the reference point (i.e. a standard deviation below the mean in the economic threat index). Some substantive effects are quite large relative to the reference point. For example, the percentage change of two standard deviations in the economic threat index on preferences for army rule is `r paste(round(with(arrow1, fd/x0)*100, 2),"%",sep="")` even if the expected value of supporting army rule under that high level of economic threat is just `r round(arrow1$x1,3)`. Likewise, the relative change in opposition to democracy is important. We know from @inglehartwelzel2005mccd that there is almost no universal opposition to democracy. Just under 10-percent of respondents across all three samples said having a democracy would be "fairly bad" or "bad" for the respondent's own country, even under high levels of economic duress. My simulations mostly affirm this. Under conditions of high economic threat, the simulated predicted probability of opposing democracy for the typical citizen is just `r round(hdrow$x1,3)`. However, the percentage change of two standard deviations is `r paste(round(with(hdrow, fd/x0)*100, 2),"%",sep="")` , a rather large effect of economic threat relative to a baseline comparison of economic prosperity.
+
+## Unpacking Macro-level Effects: The Peculiar Effect of Income Inequality 
+
+Which economic or societal threat indicators matter toward explaining preferences for authoritarian governments? I use Table 4 to summarize additional analyses I conducted and present in the supplemental appendix. I will clarify the table and summarize the major findings below.
+
+```{r models4, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="hide"}
+
+#z_age + collegeed + female + z_satisf + z_ideo + z_agency + z_intp + z_class + unemployed + z_tradv + z_postma +
+
+# z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+
+M11 <- glmer(sldummy ~
+              z_demest + z_demstock + z_ptart + 
+               z_cpi + I(z_lrgdppc*-1) + z_gdploss + z_gini + z_unemploy +
+               z_discpop + z_instab + z_ucdp + z_logwci5ya +  
+              (1  | country) + (1 | country:year) + (1 | year),
+            data=subset(Data), family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)       
+            )
+
+M12 <- glmer(ardummy ~
+              z_demest +  z_demstock + z_ptart + 
+               z_cpi + I(z_lrgdppc*-1) + z_gdploss + z_gini + z_unemploy +
+               z_discpop + z_instab + z_ucdp + z_logwci5ya +  
+              (1  | country) + (1 | country:year) + (1 | year),
+            data=subset(Data), family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)       
+            )
+
+M13 <- glmer(eddummy ~
+              z_demest +  z_demstock + z_ptart + 
+               z_cpi + I(z_lrgdppc*-1) + z_gdploss + z_gini + z_unemploy +
+               z_discpop + z_instab + z_ucdp + z_logwci5ya +  
+              (1  | country) + (1 | country:year) + (1 | year),
+            data=subset(Data), family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)       
+            )
+
+M14 <- glmer(hddummy ~
+              z_demest +  z_demstock + z_ptart + 
+               z_cpi + I(z_lrgdppc*-1) + z_gdploss + z_gini + z_unemploy +
+               z_discpop + z_instab + z_ucdp + z_logwci5ya +  
+              (1  | country) + (1 | country:year) + (1 | year),
+            data=subset(Data), family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)       
+            )
+
+M15 <- lmer(index ~ 
+              z_demest +  z_demstock + z_ptart + 
+               z_cpi + I(z_lrgdppc*-1) + z_gdploss + z_gini + z_unemploy +
+               z_discpop + z_instab + z_ucdp + z_logwci5ya +  
+              (1  | country) + (1 | country:year) + (1 | year),
+            data=Data
+            )
+```
+ 
+```{r maketable4, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="hide", message=F, warning=F}
+
+Table4 <- tidy(M11)[5:13,]
+Table4$SL <- with(Table4, ifelse(estimate > 0 & p.value < .10, "+", NA))
+Table4$SL <- with(Table4, ifelse(estimate < 0 & p.value < .10, "-", SL))
+
+Table4 <- with(Table4, data.frame(term, SL))
+
+Table4 <- cbind(Table4, tidy(M12)[5:13, c(2, 5) ])
+Table4$AR <- with(Table4, ifelse(estimate > 0 & p.value < .10, "+", NA))
+Table4$AR <- with(Table4, ifelse(estimate < 0 & p.value < .10, "-", AR))
+
+Table4 <- with(Table4, data.frame(term, SL, AR))
+
+Table4 <- cbind(Table4, tidy(M13)[5:13, c(2, 5) ])
+Table4$ED <- with(Table4, ifelse(estimate > 0 & p.value < .10, "+", NA))
+Table4$ED <- with(Table4, ifelse(estimate < 0 & p.value < .10, "-", ED))
+
+Table4 <- with(Table4, data.frame(term, SL, AR, ED))
+
+Table4 <- cbind(Table4, tidy(M14)[5:13, c(2, 5) ])
+Table4$DB <- with(Table4, ifelse(estimate > 0 & p.value < .10, "+", NA))
+Table4$DB <- with(Table4, ifelse(estimate < 0 & p.value < .10, "-", DB))
+
+Table4 <- with(Table4, data.frame(term, SL, AR, ED, DB))
+
+Table4 <- cbind(Table4, tidy(M15)[5:13, c(2, 4)])
+Table4$I <- with(Table4, ifelse(statistic > 1.645, "+", NA))
+Table4$I <- with(Table4, ifelse(statistic < -1.645, "-", I))
+
+Table4 <- with(Table4, data.frame(term, SL, AR, ED, DB, I))
+
+Table4$term <- revalue(Table4$term, 
+                           c("z_cpi" = "Consumer Price Index",
+                             "I(z_lrgdppc * -1)" = "GDP per Capita (Real)",
+                             "z_gdploss" = "GDP per Capita Loss (Real)",
+                             "z_gini" = "Income Inequality",
+                             "z_unemploy" = "Unemployment Rate",
+                             "z_discpop" = "% Discriminated Population",
+                             "z_instab" = "Political Instability",
+                             "z_ucdp" = "UCDP Intra-state Armed Conflict",
+                             "z_logwci5ya" = "Weighted Conflict Index (CNTS)"))
+
+
+
+Table4 <- rbind(data.frame(term = "Economic Threat Indicators",
+                            SL = NA, AR = NA, ED = NA, DB = NA,
+                            I=NA), Table4 )
+
+Table4 <- rbind(Table4[1:6, 1:6], data.frame(term = "Societal Threat Indicators",
+                            SL = NA, AR = NA, ED = NA, DB = NA,
+                            I=NA), Table4[7:10, 1:6] )
+
+#Table4 <- rbind(Table4[1:6, 1:6], data.frame(term = NA,
+#                            SL = NA, AR = NA, ED = NA, HD = NA,
+#                            I=NA), Table4[7:11, 1:6] )
+
+#Table4 <- rename(Table4, c(term="**Variable**", SL="*SL*", AR="*AR*",
+#                           ED="*ED*", HD="*HD*", I="*I*"))
+
+Table4s <- stargazer(Table4, type = "latex",
+          summary = FALSE, rownames = FALSE, header=FALSE,
+          title="Summary of Additional Models Exploring Macro-level Effects",
+          notes = c("\\footnotesize{The appendix has the full results of these models.}",
+        "\\footnotesize{SL = ``strong leader'', AR = ``army rule'', T = ``technocracy''}", 
+        "\\footnotesize{DB = ``democracy is bad'', I = ``index'' }")
+)
+
+
+```
+
+```{r displaytable4, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=FALSE, results="asis"}
+
+Table4s[5] <- "\\begin{tabular}{@{\\extracolsep{5pt}} lccccc} "
+Table4s[8] <- "\\textbf{Variable} & \\emph{SL} & \\emph{AR} & \\emph{T} & \\emph{DB} & \\emph{I} \\\\ " 
+
+Table4s[10] <- "\\emph{Economic Threat Indicators}  &  &  &  &  &  \\\\ " 
+Table4s[16] <- "\\emph{Societal Threat Indicators}  &  &  &  &  &  \\\\ " 
+
+
+Table4s <- c(Table4s[1:10], "\\hline \\\\[-1.8ex]", 
+             Table4s[11:15], "\\hline \\\\[-1.8ex]", Table4s[16], "\\hline \\\\[-1.8ex]", Table4s[17:length(Table4s)])
+
+for(i in c(25:27)){
+  Table4s[i] <- paste0(Table4s[i], "[-1mm]")
+}
+ 
+ cat(Table4s, sep='\n')  
+
+```
+
+
+Table 4 summarizes a series of mixed effects models with just the decomposed threat indices and the three other macro-level control variables (level of democracy, democratic stock, and territorial threat). A plus sign indicates a positive and statistically significant coefficient in that model while a minus sign indicates a negative and statistically significant coefficient. A blank space indicates a parameter that was not discernible from zero at the .10 level. 
+
+The summaries in Table 4 suggest that only the economic variables have any individual effect on attitudes toward autocracy. Just one variable was significant across all five models. Citizens in states with high income inequality are more likely to prefer strong leaders, rule of government by the army, are more likely to oppose the concept of having a democracy for their political system, and are more likely to prefer autocratic forms of government in the latent index measure. Yet, higher levels of income inequality lead to lower levels of support for technocracy. The findings suggest that income inequality is one reason why the coefficient for the economic threat index is positive and statistically significant in four of the five models in Table 1 and Table 2, but is negative (if not discernible from zero) in the model that estimates attitudes toward technocracy.
+
+Consider as well the last two columns. These summarize models that estimate attitudes in favor of an explicit rejection of democracy and a latent attitude in favor of autocracy. The summaries show that citizens in countries with high unemployment rates and severe economic contraction were likely to think of democracy as bad for their country. Citizens in states with high levels of inflation were also more likely to prefer autocracy in the latent model. These are the only models in which these macroeconomic indicators had a positive and significant effect. These macroeconomic indicators are important ones for scholars trying to make sense of the emergence and popularity of leaders like Alberto Fujimori in Peru and Vladimir Putin in Russia. Thus, scholars trying to explain individual-level preferences for autocratic political systems and make sense of these particular cases using these indicators should provide caveats. Economic contraction, inflation, and high unemployment rates lead individuals to oppose the democratic experiment, though they do not lead citizens to prefer a particular non-democratic alternative.
+
+# Conclusion
+
+The preceding analyses assessed whether economic threats or societal turmoil lead individuals to value authoritarian alternatives to a democratic political system. We know that economic duress and societal turmoil both coincide with the emergence of authoritarian political leaders that enjoy considerable popularity among their citizens. However, the emergence of these autocrats in places like Peru, Russia, and Venezuela are a small sample and our analytical energies have generally started with the success of these leaders and worked backward to explain them. Exploring what types of threat lead individuals to value authoritarian alternatives to democracy for the country is the next step toward understanding the broader phenomenon in question.
+
+I find that macroeconomic factors do more to explain preferences for authoritarian political systems. The results provided in Table 1 and Table 2 show that an economic threat index of multiple macroeconomic indicators is more consistently associated with preferences for various forms of authoritarian political systems. Citizens in states under greater economic threat are more likely to prefer a strong leader with considerable discretionary authority, are more likely to support rule of government by the army, are more likely to explicitly oppose having a democratic political system, and are more likely to prefer authoritarian governments to democracy in the index model. Societal threat only coincides with greater support for rule of government by the army.
+
+The additional models summarized in Table 4 further show what particular macroeconomic and societal indicators matter the most. Income inequality is the most robust predictor in my analyses. Citizens in states with high income inequality were more likely to express a preference for all forms of authoritarian political systems under study here with the exception of technocracy. The summaries on individual-level opposition to democracy provide caveats to scholars that look to explain support for authoritarian governments or policies by reference to the economy. Prominent indicators of economic contraction, inflation, and unemployment may lead individuals to oppose democracy, but these macroeconomic phenomena do not lead individuals to prefer a particular autocratic alternative.
+
+\newpage
+
+
+<!-- # References
+\setlength{\parindent}{-0.2in}
+\setlength{\leftskip}{0.2in}
+\setlength{\parskip}{8pt}
+\vspace*{-0.2in}
+\noindent
+\singlespacing 
+-->
