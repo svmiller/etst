@@ -875,11 +875,10 @@ The additional models summarized in Table 4 further show what particular macroec
 \newpage
 
 
-<!-- # References
-\setlength{\parindent}{-0.2in}
+# References
+<!-- \setlength{\parindent}{-0.2in}
 \setlength{\leftskip}{0.2in}
 \setlength{\parskip}{8pt}
 \vspace*{-0.2in}
 \noindent
-\singlespacing 
--->
+\singlespacing -->
