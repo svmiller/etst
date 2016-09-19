@@ -1,0 +1,1618 @@
+---
+title: Economic Threats or Societal Turmoil? Understanding Preferences for Authoritarian Political Systems
+author:
+- name: Steven V. Miller
+  affiliation: Clemson University
+  email: svmille@clemson.edu
+appendix: yes
+appendixletter: A
+output:
+  pdf_document:
+    fig_caption: yes
+    keep_tex: yes
+    latex_engine: pdflatex
+    template: ~/Dropbox/miscelanea/svm-r-markdown-templates/svm-latex-ms.tex
+    toc: yes
+    toc_depth: 2
+    citation_package: natbib
+bibliography: ~/Dropbox/master.bib
+fontfamily: mathpazo
+fontfamilyoptions: sc, osf
+fontsize: 11pt
+biblio-style: apsr
+subtitle: Supplemental Appendix
+tables: yes
+anonymous: no
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache=TRUE, kfigr.prefix=TRUE, kfigr.link=TRUE)
+setwd("~/Dropbox/projects/etst/appendix")
+
+library(foreign)
+library(car)
+library(sqldf)
+library(mirt)
+library(sbgcop)
+library(plyr)
+library(broom)
+library(stargazer)
+library(corrplot)
+library(RCurl)
+library(brglm)
+library(splines)
+library(arm)
+
+nlopt <- function(par, fn, lower, upper, control) {
+    .nloptr <<- res <- nloptr(par, fn, lb = lower, ub = upper, 
+        opts = list(algorithm = "NLOPT_LN_BOBYQA", print_level = 1,
+        maxeval = 1000, xtol_abs = 1e-6, ftol_abs = 1e-6))
+    list(par = res$solution,
+         fval = res$objective,
+         conv = if (res$status > 0) 0 else res$status,
+         message = res$message
+    )
+}
+
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  library(grid)
+
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+
+  numPlots = length(plots)
+
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+
+ if (numPlots==1) {
+    print(plots[[1]])
+
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+
+augment.ranef.mer <- function(x,
+                              ci.level=0.9,
+                              reorder=TRUE,
+                              order.var=1) {
+  tmpf <- function(z) {
+    if (is.character(order.var) && !order.var %in% names(z)) {
+      order.var <- 1
+      warning("order.var not found, resetting to 1")
+    }
+    ## would use plyr::name_rows, but want levels first
+    zz <- data.frame(level=rownames(z),z,check.names=FALSE)
+    if (reorder) {
+      ## if numeric order var, add 1 to account for level column
+      ov <- if (is.numeric(order.var)) order.var+1 else order.var
+      zz$level <- reorder(zz$level, zz[,order.var+1], FUN=identity)
+    }
+    ## Q-Q values, for each column separately
+    qq <- c(apply(z,2,function(y) {
+      qnorm(ppoints(nrow(z)))[order(order(y))]
+    }))
+    rownames(zz) <- NULL
+    pv   <- attr(z, "postVar")
+    cols <- 1:(dim(pv)[1])
+    se   <- unlist(lapply(cols, function(i) sqrt(pv[i, i, ])))
+    ## n.b.: depends on explicit column-major ordering of se/melt
+    zzz <- cbind(reshape2::melt(zz,id.vars="level",value.name="estimate"),
+                 qq=qq,std.error=se)
+    ## reorder columns:
+    subset(zzz,select=c(variable, level, estimate, qq, std.error))
+  }
+  dd <- ldply(x,tmpf,.id="grp")
+  ci.val <- -qnorm((1-ci.level)/2)
+  transform(dd,
+            p=2*pnorm(-abs(estimate/std.error)), ## 2-tailed p-val
+            lb=estimate-ci.val*std.error,
+            ub=estimate+ci.val*std.error)
+}
+
+
+show_ranef <- function(data, grp, reorder = TRUE){
+  require(broom)
+  require(ggplot2)
+  data <- augment(ranef(data,condVar=TRUE))
+  if(reorder) {
+  data <- data[data$grp == grp,]
+  data$level <- as.character(data$level)
+  }
+  else {}
+  ggplot(data[data$grp == grp,],aes(estimate, level,xmin=lb,xmax=ub))+
+    geom_errorbarh(height=0)+
+    geom_vline(xintercept=0,lty=2)+
+    geom_point()+facet_wrap(~variable,scale="free_x") + 
+    ylab("Levels of the Random Effect") +
+    xlab("Estimated Intercept")
+}
+
+get_sims <- function(model, newdata, var1, var2, nsim, seed){
+  require(arm)
+  set.seed(seed)
+    arguments <- as.list(match.call())
+  modelsim <- arm::sim(model, n.sims=nsim)
+  mm.dat = model.matrix(terms(model),newdata)
+  outputfull<-NULL
+  for(i in (1:nsim)) {
+    output <- NULL
+    yi <- mm.dat %*% coef(modelsim)$fixef[i,]
+    xi<- var1
+    xii <- var2
+    int <- var1*var2
+    sim<-rep(i, length (yi))
+    output<-cbind(yi, xi, xii, int, sim)
+    outputfull<-rbind (outputfull, output)
+  }
+    outputfull<-as.data.frame (outputfull)
+names (outputfull)<-c("y", "x1", "x2", "int", "sim")
+  return(outputfull)
+
+}
+
+
+make_qi_row <- function(sims, var, lab, logit=TRUE) {
+  require(boot)
+  if(logit) {
+  a <- mean(inv.logit(sims[var == min(var), 1]))
+  b <- mean(inv.logit(sims[var == max(var), 1]))
+  c <- mean(inv.logit(sims[var == max(var), 1])) - mean(inv.logit(sims[var == min(var), 1]))
+ diffs <- inv.logit(sims[var == max(var), 1]) - inv.logit(sims[var == min(var), 1])
+  d <- sd(inv.logit(sims[var == max(var), 1])) - mean(inv.logit(sims[var == min(var), 1]))
+  e <- paste("(",sprintf("%.3f", round(quantile(diffs,0.05), 3)),
+             ",",
+                 sprintf("%.3f", round(quantile(diffs,0.95), 3)),
+             ")", sep="")
+  }
+  else {
+  a <- mean(sims[var == min(var), 1])
+  b <- mean(sims[var == max(var), 1])
+  c <- mean(sims[var == max(var), 1]) - mean(sims[var == min(var), 1])
+  diffs <- sims[var == max(var), 1] - sims[var == min(var), 1]
+
+  e <- paste("(",sprintf("%.3f", round(quantile(diffs,0.05), 3)),
+             ",",
+                 sprintf("%.3f", round(quantile(diffs,0.95), 3)),
+             ")", sep="")
+  }
+
+  
+  result <- data.frame(label=lab, x0=a, x1= b, fd=c, ci=e)
+  return(result)
+  
+}
+```
+
+```{r loaddata, eval=TRUE, echo=FALSE, cache=TRUE}
+
+WVS <- read.dta("~/Dropbox/data/wvs/WVS_Longitudinal_1981_2014_stata_v2015_04_18.dta", convert.factors = FALSE)
+
+colnames(WVS) <- tolower(names(WVS))
+ncolwvs <- dim(WVS)[2]+1
+
+# Drop the first two waves to speed up computation.
+WVS <- subset(WVS, s002 > 2)
+
+# Basic information
+WVS$wave <- WVS$s002
+WVS$wvsccode <- WVS$s003
+WVS$year <- WVS$s020
+
+# Some case exclusions:
+# https://www.washingtonpost.com/news/monkey-cage/wp/2014/09/02/world-values-lost-in-translation/
+WVS <- WVS[!(WVS$wvsccode == 704 & WVS$wave == 4),] # Vietnam, wave 4
+WVS <- WVS[!(WVS$wvsccode == 364 & WVS$wave == 4),] # Iran, wave 4
+WVS <- WVS[!(WVS$wvsccode == 8 & WVS$wave == 3),] # Albania, wave 3
+WVS <- WVS[!(WVS$wvsccode == 360 & WVS$wave == 4),] # Indonesia, wave 4
+# I'm also dropping Iraq from Wave 4 and 5.
+WVS <- WVS[!(WVS$wvsccode == 368 & WVS$wave == 4),] # Iraq, wave 4
+WVS <- WVS[!(WVS$wvsccode == 368 & WVS$wave == 5),] # Iraq, wave 5
+
+WVS <- subset(WVS, wave <= 5)
+
+# Generate a unique ID for each respondent (i.e. row)
+WVS$uid <- seq(1, nrow(WVS))
+
+
+Data <- read.csv("~/Dropbox/projects/etst/analysis/etst-data.csv")
+Unimp <- read.csv("~/Dropbox/projects/etst/analysis/wvs-unimputed.csv")
+MID <- read.csv("~/Dropbox/projects/etst/analysis/etst-mid.csv")
+
+
+wvsccodes <- getURL("https://raw.githubusercontent.com/svmiller/wvsccodes/master/wvs-cow-ccodes-table.csv")
+wvsccodes <- read.csv(text = wvsccodes)
+
+```
+
+\newpage
+
+# Descriptive Statistics
+
+## Sampling Frame
+
+Table \ref{tab:cys} contains the countries and years from the World Values Survey (WVS) that I include in my analysis. Importantly, I omit Albania in the third wave of WVS and Indonesia, Iran, and Vietnam in the fourth wave from inclusion in this analysis. Charles Kurzman penned a *Monkey Cage* article that identified those countries as having important survey translation errors that amount to major measurement bias for some of the dependent variables in my analysis.[^lostin] I also omit Iraq. Iraq's appearance in the fourth and fifth waves of WVS occur during U.S. occupation.
+
+[^lostin]: https://www.washingtonpost.com/news/monkey-cage/wp/2014/09/02/world-values-lost-in-translation/
+
+```{r countryyears, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="asis", warning=F, message=F}
+
+countryyears <- unique(sqldf("select country, year from Data"))
+countryyears$seq <- seq(1,nrow(countryyears))
+
+splitted <- split(countryyears, cut(countryyears$seq, 4))
+
+cbind.fill<-function(...){
+    nm <- list(...) 
+    nm<-lapply(nm, as.matrix)
+    n <- max(sapply(nm, nrow)) 
+    do.call(cbind, lapply(nm, function (x) 
+    rbind(x, matrix(, n-nrow(x), ncol(x))))) 
+}
+
+CYs <- cbind.fill(splitted[[1]], splitted[[2]], splitted[[3]], splitted[[4]])
+
+CYs <- CYs[, c(1, 2, 4, 5, 7, 8, 10, 11)]
+
+CYtable <- capture.output(stargazer(CYs, type = "latex",
+          summary = FALSE, rownames = FALSE, header=FALSE, font.size = "footnotesize",
+          title="The WVS Countries and Years that Appear in the Analysis",
+          label="tab:cys"))
+
+CYtable[9] <- "\\textbf{{Country}} & \\textbf{{Year}} & \\textbf{{Country}} & \\textbf{{Year}} & \\textbf{{Country}} & \\textbf{{Year}} & \\textbf{{Country}} & \\textbf{{Year}} \\\\ "
+
+cat(CYtable, sep='\n') 
+
+```
+
+## Summary Statistics
+
+Table \ref{tab:summary} provides descriptive statistics for the variables used in the analyses I conduct in the manuscript. The statistics it provides follow the multiple imputation procedure that I will discuss later in the manuscript, which is why each variable has the same number of observations. Do note that the descriptive statistics for the emancipative values and traditional values do not follow the same distribution that WVS reports for similar measures. This is because I chose to estimate these variables as latent traits from a graded response model [@samejima1969ela]. I explain this procedure later in the appendix.
+
+```{r summarystat, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="asis", warning=F}
+
+Sumdf <- with(Data, data.frame(age, collegeed, lemanc, female, satisfin, incscale, 
+                               ideo, agency, interestp, socialclass, ltradv, unemployed,
+                               demest, demstock, ptart, eti, sti, l1_lrgdppc, 
+                               lrgdppc_5yd, logcpi, gini, unemploymentrate, logwci5ya,
+                               discpop, ucdpintraonset, instab))
+
+stargazer(Sumdf, header=FALSE, label="tab:summary",
+          title="Descriptive Statistics for the Data that Appear in the Analysis",
+          covariate.labels=c("Age", "College Education", "Emancipative Values", "Female",
+                             "Financial Satisfaction", "Household Income",
+                             "Ideology", "Personal Efficacy", "Political Interest",
+                             "Social Class", "Traditional Values", "Unemployed",
+                             "Level of Democracy", "Democratic Stock",
+                             "Level of Territorial Threat", "Economic Threat Index",
+                             "Societal Threat Index", "Real GDP per Capita",
+                             "Real GDP per Capita Loss", "Consumer Price Index",
+                             "Income Inequality", "Unemployment Rate",
+                             "Weighted Conflict Index", 
+                             "\\% Discriminated Population",
+                             "UCDP Intra-state Armed Conflict", "Political Instability"))
+
+```
+
+## Correlation Matrix
+
+Figure  \ref{fig:corrdffull} is a correlation matrix of the independent variables used in Table 2 in the manuscript. I forgo a matrix of numbers and represent the information from the correlation matrix as a "heatmap". This should be easier for the reader to assess.
+
+Most of the micro-level variables show modest to negligible correlation. Two correlations merit a mention. The individual-level income decile and the five-item ordinal social class variable correlate at `r sprintf("%.3f", round(with(Data, cor(z_class, z_inc)), 3))`, the largest individual correlation in the data. This is not a surprising correlation. Respondents that rank themselves higher in income are likely to be respondents whose professions place them in the upper class. However, the inclusion of both variables in the statistical model will not constitute a concern of collinearity in the model's estimates.
+
+
+```{r corrdffull,  eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="asis", warning=F, fig.cap="\\label{fig:corrdffull} A Correlation Matrix of the Variables Used in Table 2 in the Manuscript", fig.width=7, fig.height=5, dev.args=list(pointsize=7)}
+
+Corrdf <- with(Data, data.frame(z_age, collegeed, z_emanc, female, z_satisf, z_inc,
+                                z_ideo, z_agency, z_intp, z_class, z_tradv, unemployed,
+                                z_eti, z_sti, z_demest, z_demstock, z_ptart))
+
+Corr <- cor(Corrdf, use="complete.obs")
+
+colnames(Corr) <- c("Age", "College \n Education", "Emancipative \n Values", "Female",
+                    "Financial \n Satisfaction", "Household \n Income", "Ideology",
+                    "Personal \n Efficacy", "Political \n Interest", "Social \n Class",
+                    "Traditional  \n Values", "Unemployed", 
+                    "Economic \n Threat Index", "Societal \n Threat Index",
+                    "Level of \n Democracy", "Democratic \n Stock",
+                    "Level of \n Territorial Threat")
+
+rownames(Corr) <- c("Age", "College Education", "Emancipative Values", "Female",
+                    "Financial Satisfaction", "Household Income", "Ideology",
+                    "Personal Efficacy", "Political Interest", "Social Class",
+                    "Traditional Values", "Unemployed", 
+                    "Economic Threat Index", "Societal Threat Index",
+                    "Level of Democracy", "Democratic Stock",
+                    "Level of Territorial Threat")
+
+corrplot::corrplot(Corr, method = "number",  tl.col="black", tl.cex=.8, 
+         tl.srt=45,  type="lower")
+
+
+```
+
+The Pearson's *r* for the traditional values variable and the emancipative values variable is  `r sprintf("%.3f", round(with(Data, cor(z_tradv, z_emanc)), 3))`, the second largest correlation in the data. This is unsurprising since the the emancipative values and traditional values framework share a few indicators in common (i.e. two elements of the four-item child autonomy index and the justifiability of abortion). However, the modest correlation suggests what recent authoritarianism scholarship [e.g. @duckittetal2010tar] that traditional values are separable from other related attitudes.
+
+Figure \ref{fig:corrdffull} suggests no two variables pared together in my analysis constitute concerns of collinearity in the statistical model.
+
+# Coding Procedure
+
+This section of the appendix clarifies the coding procedure for the data I use in my analysis. The manuscript should make clear most coding procedures for some of the more familiar variables in my models (e.g. the WVS micro-level variables) though space considerations move a treatment of some important issues in the data processing stage from the main body of the manuscript to the appendix. I start with a discussion of the multiple imputation procedure before moving to a discussion of how I coded latent territorial threat and the emancipative values and traditional values variables.
+
+## Multiple Imputation
+
+Several multilevel analyses, certainly those using World Values Survey (WVS) data, ignore the issue of missing data. It is convenient to ignore the problem of missingness in WVS analyses because WVS data in a given wave are substantively large to begin. The remaining number of observations after listwise deletion can still be in the tens of thousands.  However, missingness is relative. Scholars that discard a large proportion of the original data with listwise deletion, knowing already the extent of missingness on certain variables in the WVS data, introduce issues of inefficiency, bias, or both into their analyses.
+
+I will not delve fully into theoretical and practical issues of missing data, leaving that discussion to canonical texts provided elsewhere [@rubin1976imd, as one example]. Generally, missing data pose different problems contingent on the type of missingness. If the data are missing completely at random (MCAR), then missingness---even on a large scale like that reported here---creates inefficient estimates at worst. In this case, a hypothetical respondent flipped a coin and decided to not report her ideology or preference for army rule because the coin came up tails. Inefficient estimates may still follow with artificially large standard errors, but there is no issue of biased estimates.
+
+If the data are missing at random (MAR), then the variables in question are missing values contingent on other factors that can explain their missingness. For example, suppose a respondent withholds her opinion on her support for army rule. We may say that actually she does support rule of government by the army, but chooses not to disclose that. However, she discloses her ideology as furthest to the right in another survey item. We may not know her preference for rule of government by the military, but we know she places herself furthest to the ideological right and that this variable is associated with the other variable of interest. MAR is not completely random,  but it depends on other information that we have. We can use this other information to model the missingness on MAR data.
+
+Data that are missing not at random (MNAR) provide the most difficult challenge to the researcher. When the reason for missingness is unknown and depends only on the missing value itself, then researchers have biased estimates after listwise deletion is applied. In most applications, listwise deletion of MAR data introduces inefficiencies in the estimates in addition to the problem of bias. Political scientists and statisticians who take seriously the issue of missing data argue that we can usually assume MAR when we deal with missing data [@honakerking2010wdmv]. Missingness is never truly unknown and unexplainable. We can model missing data as if they were MAR, providing estimates for missing data that reflect both their likely values and the uncertainty we, as researchers, have in our imputed estimates.
+
+Table \ref{tab:misst} describes the extent of missingness before imputation. Missingness on basic background information about the respondents was negligible. Almost all respondents disclosed their age, level of education, employment status and self-identified gender. Missingness was much more problematic for the other micro-level control variables. The ideology question was by far the biggest culprit for missingness in the data. Over 30% of respondents withheld their ideology or were not asked this question. Missingness on the four dependent variables were rather large as well.However, we can understand most of the missingness on the dependent variables as a function of WVS surveyers not asking the question in the particular country-year. Observe Figure \ref{fig:levplot}, which is a levelplot that summarizes missigness for a particular variable (*x*-axis) by country-year (*y*-axis).
+
+```{r summiss, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="asis", warning=F}
+
+Unimps <- Unimp
+Unimps$uid <- NULL
+
+Unimps <- join(Unimps, wvsccodes, by=c("wvsccode"), type="left", match="first")
+
+# Some case changes
+Unimps <- subset(Unimps, !is.na(ccode)) # Get rid of HK, PR, and Palestine
+Unimps$ccode[Unimps$ccode == 341 & Unimps$year < 2006] <- 345 # Montenegro changes.
+Unimps$country[Unimps$ccode == 345] <- "Serbia"
+
+Unimps$countryyear <- paste(Unimps$country,", ",Unimps$year, sep="")
+Unimps$wvsccode <-  Unimps$year <- Unimps$country <- Unimps$ccode <- Unimps$postma <- NULL
+
+
+Miss <- data.frame(var=names(Unimps), miss=apply(Unimps, 2, function(col)sum(is.na(col))/length(col)))
+
+rownames(Miss) <- c()
+Miss <- subset(Miss, !(var == "countryyear" | var == "wave" | var == "postma"))
+Miss$miss <- with(Miss, paste(sprintf("%.2f", round(miss*100, 2)),"%", sep=""))
+
+Miss$var <- c("Strong Leader", "Experts Make Decisions", "Army Rule", "Democracy is Bad",
+              "Age", "Female", "College Education", "Unemployed", 
+              "Financial Satisfaction", "Ideology", "Social Class", "Household Income",
+              "Political Interest", "Latent Traditional Values", "Personal Efficacy", 
+              "Latent Autonomy Estimate", "Latent Equality Values",
+              "Latent Choice Values", "Latent Voice Values",
+              "Latent Emancipative Values"
+              )
+
+Misst <- capture.output(
+  stargazer(Miss, type="latex", label="tab:misst", summary=FALSE, rownames=F, 
+            title="The Extent of Missingness in Variables before Imputation",
+            header=FALSE
+            ))
+
+Misst[5] <- "\\begin{tabular}{@{\\extracolsep{5pt}} lc} " 
+Misst[8] <- "\\textbf{Variable} & \\textbf{\\% Missing} \\\\ "
+
+cat(Misst, sep='\n') 
+
+```
+
+```{r namat,  eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="asis", warning=F,  fig.height=9, fig.cap="\\label{fig:levplot} A Levelplot of Missingness in the Unimputed Data"}
+
+
+
+namat <- matrix(ncol=length(unique(Unimps$countryyear)), nrow=ncol(Unimps))
+for (i in 1:dim(Unimps)[2])
+{
+    namat[i,] <- tapply(Unimps[[i]], Unimps$countryyear, function(x) sum(is.na(x)) / length(x))
+}
+
+dimnames(namat) <- list(
+names(Unimps),
+sort(unique(Unimps$countryyear)))
+
+library(lattice)
+namat <- subset(namat, rownames(namat) != "countryyear")
+namat <- subset(namat, rownames(namat) != "wave")
+namat <- subset(namat, rownames(namat) != "postma")
+
+
+levelplot(namat,
+scales=list(x=list(rot=45, cex=.5), y=list(cex=.4)),
+# main="Percentage missing values on variables \n in the Unimputed WVS Data",
+xlab="Variable",
+ylab="Country-Year", aspect="fill")
+
+
+```
+
+I chose a novel approach to multiple imputation of missing data that more social scientists should consider along with familiar programs like Amelia [@blackwelletal2015uame] or multiple imputation via chained equations (MICE) [@vanbuurengroothuis2011mice]. @hollenbachetal2014fei start with the observation that most social scientists do not model missing data (i.e. pursue listwise deletion) despite the social sciences knowing about advances in multiple imputation software since 1998 [@honakeretal1998a] and knowing about the overall inferential problem of missing data since the 1970s [@rubin1976imd]. They suggest that practicality concerns explain this inability to incorporate missing data methods into the analysis. Multiple imputation software has come a long way but is still takes time to impute via chained equations or draws from a multivariate normal distribution. The traditional practice---multiply imputing five data sets through Amelia and combining regression parameter estimates with Rubin's rules [@rubin1987mins]---creates an additional layer of labor in the aggregation of the estimates and the presentation in the manuscript.
+
+@hollenbachetal2014fei offer a solution to this practical problem. They extend @hoff2007erl, who proposes a semiparametric Bayesian Gaussian copula estimation and imputation procedure for missing multivariate data. @hollenbachetal2014fei find this approach has several advantages for social scientists over other alternatives. Importantly, semiparametric Bayesian Gaussian copula imputation is fast. My comparisons with this approach relative to Amelia suggests users can create 100 multiply imputed data sets through semiparametric Bayesian Gaussian copula imputation in the time it would take Amelia to generate five multiply imputed data sets. It performs well in correctly imputing missing values of all types given a known data-generating process. @hollenbachetal2014fei find that its prediction error even using the rounded mean of estimates from the multiply imputed draws is comparable to Amelia and better than MICE.[^roundedmean]
+
+[^roundedmean]: Those that use Amelia take for granted that Amelia's draws from a multivariate normal distribution for categorical and ordered categorical data introduce interval-level estimates that the user must specify in the Amelia call to round to a discrete value. This, in part, motivates the @cranmergill2013whbd critique that this rounding constitutes important bias and multiple hot deck imputation would be a better approach for discrete values.
+
+I follow their advice in my multiple imputation approach to efficiently and quickly deal with missing data in my analysis. I impute 100 full data sets from a reproducible seed (`8675309`).[^jenny] Thereafter, I use the mean of the 100 estimates for each non-interval data (i.e. all variables that were not the traditional or emancipative values). This generates one full data set that I use in the analyses in my manuscript.
+
+[^jenny]: Jenny, I got your number. I need to make you mine. Jenny, don't change your number...
+
+## Coding Territorial Threat
+
+@miller2016ieea argues that states with external threats to their country's security, namely threats to territorial integrity, have citizens who prefer "strong leaders" capable of ruling by discretion without legislative interference or electoral oversight. His dependent variable is the same "strong leaders" question that I use as the first dependent variable in my analysis. An anonymous reviewer asked that I incorporate this argument into my analyses.
+
+Incorporation of this argument required more than a simple download of his data and merge into my data. There were several caveats. First, @miller2016ieea analyses just the third and fourth waves of WVS data ostensibly because his analysis occurred before 2014, when the Correlates of War projected updated their Militarized Interstate Dispute (CoW-MID) data from 2001 to 2010. The @gibleretal2016amid analysis also does not use the "clean" CoW-MID data. Researchers with an intimate knowledge of the CoW-MID data have known for some time the extent of errors in the most widely used conflict data set. @gibleretal2016amid have a new data set that updates and cleans the CoW-MID data given the extent of errors they found over their five-year National Science Foundation-funded evaluation. Finally, the @miller2016ieea approach to analyzing territorial threat as a "latent" estimate from directed dyad-year models runs into some software problems. The program of choice for generating dyad-year data, EUGene [@bennettstam2000e, v. 3.204], is deprecated. In addition to using out-of-date, error-prone conflict data, EUGene does not know that Serbia (for example) has "politically relevant" neighbors like Croatia and Bosnia in the 21st century.
+
+I had to start from scratch to test the @miller2016ieea argument in this analysis. I read his appendix carefully and produced an updated version of his latent measure of territorial threat, ultimately extending and replicating his findings in the process. Data limitations precluded my ability to include all the independent variables he used in his analysis, but I focused my attention to the indicators @miller2016ieea finds has a statistically significant association with territorial conflict.
+
+The inability for EUGene to keep track of politically relevant dyads in the 21st century constituted one major reason I had to pursue a different approach to testing the @miller2016ieea argument. I start with the `cshapes` package [@weidmanngleditsch2010mmcs] in R, which I use to generate all directed dyad-years of countries whose *minimum* distance is 400 miles or less from 1946 to 2010. @weidmanngleditsch2010mmcs regularly update this package in R, which makes it attractive to use as a sampling frame. This data also generates one important independent variable, minimum distance between pairs in a dyad-year, in the model.
+
+I acquired the "clean" CoW-MID data that @gibleretal2016amid describe in a manuscript forthcoming in *International Studies Quarterly*. I took the "clean" dispute-level and participant-level data and generated non-duplicated directed dyad-years. I code the dependent variable that I use in the statistical model to estimate latent territorial threat as the onset of a militarized interstate dispute for which territory (i.e. `revtype == 1`) was the primary or secondary motivation for the participant. I also follow longstanding advice in the field [i.e. @becketal1998tts] and generate peace years for the ongoing territorial conflicts and estimate three cubic splines in the model to address temporal dependence.
+
+I looked carefully at the first two models in the @miller2016ieea appendix to gather additional covariates to estimate. Several come from the Correlates of War project. I code a dummy variable if the first country in the directed dyad-year is a major power. I code a dummy variable for the presence of an alliance if the two states in the dyad had a defense pact, neutrality agreement, non-aggression pact, or entente in the given year [@gibler2009ima, v. 4.1]. I code the presence of a violent territorial transfer in the five years prior to the dyad-year [@tiretal1998tc, v. 5]. I create a directed militarization variable that is the difference between the ratio of military personnel size over total population of the first country in the directed dyad-year and the ratio of military personnel size over total population of the second country. Readers familiar with the Correlates of War project will know the National Military Capabilities data [@singeretal1972cdu, v. 4.0] in its current form has a temporal domain from 1816 to 2007. I use the World Bank data on population size and military personnel (aggregated from *The Military Balance*) to fill in missing values and extend the data to 2010.
+
+I gather data from additional sources as well. I obtained mountainous terrain data from the @giblermiller2014etts extension of the well-cited @fearonlaitin2003eicw data on mountainous terrain. I extend this data to include a few new observations (e.g. Kosovo) and create a mountainous terrain ratio variable of the less mountainous state over the more mountainous state. I use the @huthallee2002dptc territorial claim data and follow Miller's advice on which observations to extend past 1999. I include only one new variable that did not appear in the @miller2016ieea analysis. I code a one for the presence of a spatial rivalry [@thompsondreyer2012hir] in the directed dyad-year. The concept of "spatial rivalry" that @thompsondreyer2012hir describe clusters on issues of disputed territory.
+
+```{r mid, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="asis", warning=F}
+
+#MID$militarization <- NA
+#MID$militarization <- with(MID, ifelse((milper1/tpop1) > (milper2/tpop2),
+#                                      (milper2/tpop2)/(milper1/tpop1),
+#                                       (milper1/tpop1)/(milper2/tpop2)))
+
+#MID$mtndiff <- NA
+#MID$mtndiff <- with(MID, ifelse(newlmtnest1 > newlmtnest2,
+#                                newlmtnest2/newlmtnest1,
+#                                newlmtnest1/newlmtnest2))
+
+TT1 <- brglm(terrmidon ~ mindist + majpow1 + militarization + terrclaim + 
+               spatrivalry + allied + violtrans + mtndiff + bs(spell, 4),
+           data=MID, family=binomial(logit), 
+           na.action = na.exclude, method="brglm.fit", pl=TRUE)
+
+
+Midt <- capture.output(
+  stargazer(TT1, type="latex", label="tab:midt", style="ajps",
+            omit.stat=c("aic","bic", "ll"), 
+            model.names=FALSE, dep.var.labels.include = FALSE,
+            title="A Directed Dyad-Year Model of Territorial MID Onset, 1946-2010",
+            header=FALSE, omit=c("Constant", "spell"),
+            covariate.labels=c("Minimum Distance (in Miles)",
+                               "Side A is a Major Power",
+                               "Militarization",
+                               "Territorial Claim", "Spatial Rivalry",
+                               "Alliance in the Dyad",
+                               "Violent Territorial Transfer",
+                               "Mountainous Terrain",
+                               "Peace Year", "Cubic Spline (1)",
+                               "Cubic Spline (2)", "Cubic Spline (3)"),
+            notes=c("Peace year and splines omitted to save space.")
+            ))
+
+cat(Midt, sep='\n') 
+
+```
+
+Table \ref{tab:midt} shows the results of the logistic model I estimate. The model itself does take into account the "rarity" of the event [@kingzeng2001lrre] and estimates the parameters through penalized likelihood [@firth1993brml]. Briefly, the results suggest stastical associations that are discernible from zero for all parameters except those for militarization and the presence of an alliance in the dyad.
+
+I then create predicted probabilities for each observation in the data set given the parameters of the model. For each in a country in a given year, I average these predicted probabilities of territorial conflict onset. I then perform a logistic transformation of these averaged predicted probabilities because the values are hard bound between 0 and 1 but show a discernible right skew (given the rarity of the event). These values become the estimates of latent territorial threat that I standardize and scale by two standard deviations before estimating in Tables 1 and 2 in the manuscript.
+
+## Coding Emancipative and Traditional Values
+
+An earlier version of this manuscript bemoaned that the five traditional values from the WVS data---the justifiability of an abortion, the importance of god, the child autonomy index, national pride, and respect for authority---were responsible for over 20% of the missingness in the data prior to imputation. Even though the justifiability of abortion question led all traditional values items on rate of missingness (9.06%), the missingness across the other four items did not overlap. I wanted to minimize the presence of missingness prior to imputation.
+
+R3 for *Political Behavior* also asked that I look at the "emancipative values" framework that @welzel2013fr proposes. Welzel's appendix proposes a novel way of using estimated values from regression to impute one of his subcomponents when one of those indicators is missing. However, Welzel's approach would still produce more missing values if only one indicator was available.
+
+I decided to pursue a latent estimation approach through a graded response model [@samejima1969ela] for these two variables. This estimation procedure also produces the macro-level democracy estimate [i.e. @pemsteinetal2010dc]. The intuition for this approach is simple. Each indicator (e.g. the child autonomy index or the justifiability of homosexuality) is a "judge" of some latent trait (i.e. traditional values, a particular component of the emancipative values). Each rating the "judge" gives for a particular observation (i.e. respondent) roughly captures the "true" level of the concept in question, but each judge makes some stochastic error we can model. Thus, the data-generating process for the latent estimate is a simple formula in which the judges' perception of the concept in question (emancipative value subcomponent or traditional values) equals the "true" value of the concept plus stochastic errors that are normally distributed with unbounded variances. The estimation itself resembles multi-rater ordinal probit techniques that education researchers developed to compare the performance of multiple essay graders, each which may have their own scale.
+
+This approach has several advantages in addition to conforming to the ordinal nature of the WVS data. Each observation comes with an estimated standard error that gives us a sense of the uncertainty regarding the estimate. This error decreases with more available observations. This also means that not all indicators need to be present for the item response model to produce an estimate. For a given row in the data set, at least one observation not be missing. This will mollify the issue of missingness prior to imputation.
+
+```{r tradv, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="asis", warning=F}
+
+Tradvalues <- with(WVS, data.frame(uid, a040, a042, a029, a039, f120, f063, e018, g006))
+
+Tradvalues$cai <- with(Tradvalues, ifelse(a040 >=0 & a042 >=0 & a029 >= 0 & a039 >= 0,
+                            (a029 + a039)-(a040 + a042), NA))
+Tradvalues$cai <- Tradvalues$cai * -1
+Tradvalues$aj <- with(Tradvalues, ifelse(f120 < 0, NA, (f120 * -1) + 10)) # invert it.
+Tradvalues$godimp <- with(Tradvalues, ifelse(f063 < 0, NA, f063-1))
+Tradvalues$respauth <- with(Tradvalues, recode(e018, "-5:-1=NA; 1=1; 2=0; 3=-1"))
+Tradvalues$natpride <- with(Tradvalues, recode(g006, "-5:-1=NA; 1=3; 2=2; 3=1; 4=0"))
+
+Tradvalues <- with(Tradvalues, data.frame(uid, cai, aj, godimp, respauth, natpride))
+
+Tradvalues$ztradv <- with(Tradvalues, (1/5)*(rescale(cai) + rescale(aj) + rescale(godimp) + rescale(respauth) + rescale(natpride)))
+
+missratetv <- sum(is.na(Tradvalues$ztradv))/nrow(Tradvalues)
+missrateaj <- sum(is.na(Tradvalues$aj))/nrow(Tradvalues)
+
+
+Tradvalues$removeme <- with(Tradvalues, ifelse(is.na(cai) & is.na(aj) & is.na(godimp) & is.na(respauth) & is.na(natpride), 1, 0))
+sumtvzt <- sum(is.na(Tradvalues$ztradv))
+sumtvrm <- sum(Tradvalues$removeme)
+Tradvalues <- subset(Tradvalues, removeme == 0)
+Tradvalues$removeme <- NULL # Removes just 13 observations
+
+TradM <- mirt(Tradvalues[ ,  2:6], model = 1,
+             itemtype = "graded", SE = TRUE, verbose = FALSE)
+
+tradscores <- fscores(TradM, full.scores = TRUE, full.scores.SE = TRUE)
+Tradvalues <- cbind(Tradvalues, tradscores)
+Tradvalues <- rename(Tradvalues, c("F1" = "ltradv", "SE_F1" = "se_ltradv"))
+
+cortv <- with(Tradvalues, cor(ztradv, ltradv, use="complete.obs"))
+
+Tradvalues <- with(Tradvalues, data.frame(uid, ltradv))
+
+```
+
+I will start with the estimation of the traditional values variable to illustrate the utility of this approach. The original version of the manuscript took all five of the traditional values variables, scaled them by two standard deviations from the mean, and averaged their sum. This approach is standard but it compounded the issue of pre-imputation missingness. A replication of this approach shows a missingness rate of `r paste(sprintf("%.2f", missratetv*100),"%", sep="")` for the traditional values variable. This is because missingness on the five traditional values indicators do not tend to overlap even if the biggest rate of missingness falls on just one of the indicators (the justifiability of abortion: `r paste(sprintf("%.2f", missrateaj*100), "%", sep="")`). However, a graded response model requires at least one value to not be missing. Thus, the standard scale-and-average approach I used previously results in listwise deletion of `r formatC(sumtvzt, format="d", big.mark=',')` total observations (i.e. `r paste(sprintf("%.2f", missratetv*100),"%", sep="")`) while the graded response model approach results in a listwise deletion of just *`r sumtvrm`* observations. Like the scale-and-average approach, the graded response model generates estimates that are normally distributed around zero (albeit with a standard deviation of one whereas I prefer to scale by two standard deviations [see: @gelman2008sri]). Further, the scale-and-average approach and the graded response model approach produce estimates that correlate almost perfectly (*r* = `r sprintf("%.3f", round(cortv, 3))`). The only real difference is the graded response model saves `r formatC(sumtvzt-sumtvrm, format="d", big.mark=',')` observations from listwise deletion.
+
+I take the same approach to the measure of emancipative values even though @welzel2013fr has a novel approach to saving values from listwise deletion. His approach uses a series of models that regress estimated values of the subcomponents (i.e. autonomy, choice, equality, voice) on *k*-1 independent variables in which *k* refers to the number of indicators that comprise a subcomponent. This is a practical solution to missing data. If the respondent offered no response to the justifiability of homosexuality in the choice subcomponent, but did offer a response to the justifiability of abortion or divorce in the same choice subcomponent, @welzel2013fr regresses the estimated choice value on the the justifiability of abortion and the justifiability of divorce. He then adds the intercept from the model with the other regression parameters and the corresponding observations from the WVS data set for those indicators to impute the choice subcomponent. He rotates this for all indicators for all subcomponents and, later does the same for the estimated emancipative value from the four subcomponents.
+
+I copy parts of this approach, though I rely principally on the graded response model approach to save values from listwise deletion. My rationale here is simple. Welzel's approach saves values from listwise deletion if just one indicator of a particular subcomponent is missing. The graded response model approach saves values from listwise deletion if just one indicator is *not* missing.
+
+```{r emanc, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="asis", warning=F, message=F}
+
+WVS$emancvalues <- WVS$y020
+WVS$autonomy <- with(WVS, recode(y021, "-5:-1=NA"))
+WVS$equality <- with(WVS, recode(y022, "-5:-1=NA"))
+WVS$choice <- with(WVS, recode(y023, "-5:-1=NA"))
+WVS$voice <- with(WVS, recode(y024, "-5:-1=NA"))
+
+# duplicate autonomy
+Autonomy <- with(WVS, data.frame(uid, autonomy, a029, a034, a042))
+
+Autonomy[,3:ncol(Autonomy)] <- sapply(Autonomy[,3:ncol(Autonomy)],
+                                      function(x)ifelse(x<=-1,NA,x))
+
+Autonomy$removeme <- with(Autonomy, ifelse(is.na(a029) & is.na(a034) & is.na(a042), 1, 0))
+
+missrateaw <- sum(is.na(Autonomy$autonomy))/nrow(Autonomy)
+missrateam <- sum(Autonomy$removeme)/nrow(Autonomy) 
+
+Autonomy <- subset(Autonomy, removeme == 0)
+Autonomy$removeme <- NULL
+
+colnames(Autonomy) <- c("uid", "autonomy", "kid_ind", "kid_imag", "kid_obed")
+Autonomy$kid_obed <- with(Autonomy, recode(kid_obed, "1=0;0=1"))
+
+AutM <- mirt(Autonomy[ ,  3:ncol(Autonomy)], model = 1,
+             itemtype = "graded", SE = TRUE, verbose = FALSE)
+
+autscores <- fscores(AutM, full.scores = TRUE, full.scores.SE = TRUE)
+Autonomy <- cbind(Autonomy, autscores)
+Autonomy <- rename(Autonomy, c("F1" = "laut", "SE_F1" = "se_laut"))
+
+coraut <- with(Autonomy, cor(laut, autonomy, use="complete.obs"))
+Autonomy <- with(Autonomy, data.frame(uid, laut))
+
+WVS <- join(WVS, Autonomy, by=c("uid"), type="left", match="first")
+WVS$autonomy <- NULL
+rm(Autonomy, AutM, autscores)
+
+# duplicate equality
+
+Equality <- with(WVS, data.frame(uid, equality, c001, d059, d060))
+
+Equality[,3:ncol(Equality)] <- sapply(Equality[,3:ncol(Equality)],
+                                      function(x)ifelse(x<=-1,NA,x))
+
+Equality$removeme <- with(Equality, ifelse(is.na(c001) & is.na(d059) & is.na(d060), 1, 0))
+
+missrateew <- sum(is.na(Equality$equality))/nrow(Equality)
+missrateem <- sum(Equality$removeme)/nrow(Equality) 
+
+Equality <- subset(Equality, removeme == 0)
+Equality$removeme <- NULL
+
+colnames(Equality) <- c("uid", "equality", "menjob", "menleaders", "boycollege")
+
+EquM <- mirt(Equality[ ,  3:ncol(Equality)], model = 1,
+             itemtype = "graded", SE = TRUE, verbose = FALSE)
+
+equscores <- fscores(EquM, full.scores = TRUE, full.scores.SE = TRUE)
+Equality <- cbind(Equality, equscores)
+Equality <- rename(Equality, c("F1" = "lequ", "SE_F1" = "se_lequ"))
+
+corequ <- with(Equality, cor(lequ, equality, use="complete.obs"))
+Equality <- with(Equality, data.frame(uid, lequ))
+
+WVS <- join(WVS, Equality, by=c("uid"), type="left", match="first")
+WVS$equality <- NULL
+
+rm(Equality, EquM, equscores)
+
+# duplicate choice
+
+Choice <- with(WVS, data.frame(uid, choice, f118, f120, f121))
+
+Choice[,3:ncol(Choice)] <- sapply(Choice[,3:ncol(Choice)],
+                                  function(x)ifelse(x<=-1,NA,x))
+
+Choice$removeme <- with(Choice, ifelse(is.na(f118) & is.na(f120) & is.na(f121), 1, 0))
+
+missratecw <- sum(is.na(Choice$choice))/nrow(Choice)
+missratecm <- sum(Choice$removeme)/nrow(Choice) 
+
+Choice <- subset(Choice, removeme == 0)
+Choice$removeme <- NULL
+
+colnames(Choice) <- c("uid", "choice", "hj", "aj", "dj")
+
+
+ChoM <- mirt(Choice[ ,  3:ncol(Choice)], model = 1,
+             itemtype = "graded", SE = TRUE, verbose = FALSE)
+
+choscores <- fscores(ChoM, full.scores = TRUE, full.scores.SE = TRUE)
+Choice <- cbind(Choice, choscores)
+Choice <- rename(Choice, c("F1" = "lcho", "SE_F1" = "se_lcho"))
+
+corcho <- with(Choice, cor(lcho, choice, use="complete.obs"))
+Choice <- with(Choice, data.frame(uid, lcho))
+
+WVS <- join(WVS, Choice, by=c("uid"), type="left", match="first")
+WVS$choice <- NULL
+
+rm(Choice, ChoM, choscores)
+
+# duplicate voice
+
+Voice <- with(WVS, data.frame(uid, voice, e001, e002, e003, e004))
+
+Voice[,3:ncol(Voice)] <- sapply(Voice[,3:ncol(Voice)],
+                                function(x)ifelse(x<=-1,NA,x))
+
+Voice$acsay <- NA
+Voice$acsay <- with(Voice, ifelse(e001 == 3, 2, acsay))
+Voice$acsay <- with(Voice, ifelse(e002 == 3, 1, acsay))
+Voice$acsay <- with(Voice, ifelse(e001 != 3 & e002 != 3 & !is.na(e001), 0, acsay))
+
+Voice$apsay <- NA
+Voice$apsay <- with(Voice, ifelse((e003 == 2  & e004 == 4) | (e003 == 4  & e004 == 2),
+                                  3, apsay))
+Voice$apsay <- with(Voice, ifelse((e003 == 2  & e004 != 4) | (e003 == 4  & e004 != 2),
+                                   2, apsay))
+Voice$apsay <- with(Voice, ifelse((e003 != 2  & e004 == 4) | (e003 != 4  & e004 == 2),
+                                  1, apsay))
+Voice$apsay <- with(Voice, ifelse((e003 != 2  & e004 != 4) & (e003 != 4  & e004 != 2),
+                                  0, apsay))
+
+
+Voice$removeme <- with(Voice, ifelse(is.na(acsay) & is.na(apsay), 1, 0))
+
+missratevw <- sum(is.na(Voice$voice))/nrow(Voice)
+missratevm <- sum(Voice$removeme)/nrow(Voice) 
+
+Voice <- subset(Voice, removeme == 0)
+Voice$removeme <- NULL
+
+VoiM <- mirt(Voice[ ,  7:ncol(Voice)], model = 1,
+             itemtype = "graded", SE = TRUE, verbose = FALSE)
+
+voiscores <- fscores(VoiM, full.scores = TRUE, full.scores.SE = TRUE)
+Voice <- cbind(Voice, voiscores)
+Voice <- rename(Voice, c("F1" = "lvoi", "SE_F1" = "se_lvoi"))
+
+corvoi <- with(Voice, cor(lvoi, voice, use="complete.obs"))
+Voice <- with(Voice, data.frame(uid, lvoi))
+
+WVS <- join(WVS, Voice, by=c("uid"), type="left", match="first")
+WVS$voice <- NULL
+
+rm(Voice, VoiM, voiscores)
+
+# duplicate emancvalues
+
+Emanc <- with(WVS, data.frame(uid, emancvalues, laut, lequ, lcho, lvoi))
+Emanc$lemanc <- with(Emanc, (1/4)*(laut + lequ + lcho + lvoi))
+
+coremanc1 <- with(Emanc, cor(emancvalues, lemanc, use="complete.obs"))
+
+A1 <- lm(lemanc ~ lequ + lcho + lvoi, data=Emanc) # missing laut
+A2 <- lm(lemanc ~ laut + lcho + lvoi, data=Emanc) # missing lequ
+A3 <- lm(lemanc ~ laut + lequ + lvoi, data=Emanc) # missing lcho
+A4 <- lm(lemanc ~ laut + lequ + lcho, data=Emanc) # missing lvoi
+A1df <- tidy(A1)
+A2df <- tidy(A2)
+A3df <- tidy(A3)
+A4df <- tidy(A4)
+
+Emanc$lemanc <- with(Emanc, ifelse(is.na(laut) & is.na(lemanc),
+                                   A1df[1,2] + A1df[2,2]*lequ +
+                                     A1df[3,2]*lcho + A1df[4,2]*lvoi, lemanc))
+
+Emanc$lemanc <- with(Emanc, ifelse(is.na(lequ) & is.na(lemanc),
+                                   A2df[1,2] + A2df[2,2]*laut +
+                                     A2df[3,2]*lcho + A2df[4,2]*lvoi, lemanc))
+
+Emanc$lemanc <- with(Emanc, ifelse(is.na(lcho) & is.na(lemanc),
+                                   A3df[1,2] + A3df[2,2]*laut +
+                                     A3df[3,2]*lequ + A3df[4,2]*lvoi, lemanc))
+
+Emanc$lemanc <- with(Emanc, ifelse(is.na(lvoi) & is.na(lemanc),
+                                   A4df[1,2] + A4df[2,2]*laut +
+                                     A4df[3,2]*lequ + A4df[4,2]*lcho, lemanc))
+
+coremanc2 <- with(Emanc, cor(emancvalues, lemanc, use="complete.obs"))
+
+missrateemancw <- sum(is.na(Emanc$emancvalues))/nrow(Emanc)
+missrateemancm <- sum(is.na(Emanc$lemanc))/nrow(Emanc) 
+
+Emanc <- with(Emanc, data.frame(uid, lemanc))
+
+# WVS <- join(WVS, Emanc, by=c("uid"), type="left", match="first")
+# WVS$emancvalues <- NULL
+
+Coremanc <- data.frame(
+  item=c("Autonomy", "Choice", "Equality", "Voice", "Emancipative Values"), 
+  cor=c(coraut, corcho, corequ, corvoi, coremanc2), 
+  missw=c(missrateaw, missratecw, missrateew, missratevw, missrateemancw),
+  missm=c(missrateam, missratecm, missrateem, missratevm, missrateemancm)
+  )
+
+Coremanc$missw <- with(Coremanc, paste(sprintf("%.2f", round(missw*100, 2)),"%", sep=""))
+Coremanc$missm <- with(Coremanc, paste(sprintf("%.2f", round(missm*100, 2)),"%", sep=""))
+
+
+Coremanct <- capture.output(stargazer(Coremanc, type = "latex",
+          summary = FALSE, rownames = FALSE, header=FALSE, font.size = "small",
+          title="Comparisons between Welzel's Emancipative Values and My Emancipative Values",
+          label="tab:coremanc"))
+
+Coremanct[6] <- "\\begin{tabular}{@{\\extracolsep{5pt}} lccc} "
+# Coremanct[9] <- "\\textbf{Variable} & \\textbf{Pearson's \\emph{r}} & missw & missm \\\\ " 
+Coremanct[9] <- "\\textbf{Variable} & \\textbf{Pearson's \\emph{r}} & \\textbf{\\% Missing (Welzel)} & \\textbf{\\% Missing (Author)} \\\\ "
+
+cat(Coremanct, sep='\n') 
+
+rm(A1, A1df, A2, A2df, A3, A3df, A4, A4df, Emanc)
+```
+
+Table \ref{tab:coremanc} compares the emancipative values Welzel provides through WVS with my approach. Do note the high correlations between Welzel's values and my estimation of those values through latent trait estimation. Welzel's equality subcomponent correlates with my estimate of the equality subcomponent at just .882 though the four other correlations are all above .95. The autonomy and voice subcomponents even correlate at .98. Also note the differences between missing values in the last two columns for the four subcomponents. My graded response model estimation saves more observations compared to the subcomponent values Welzel provides through the WVS even *after* the regression imputation procedure Welzel does. The only divergence here is the voice subcomponent. The percentage missing in my latent trait estimation is greater than the percentage of values missing in Welzel's variable after his rotating regression imputation procedure.
+
+I do borrow his regression imputation procedure when I aggregate the four subcomponent estimates to the overall emancipative value. First, I engage in the conventional scale-add-average approach that Welzel does as well. I then do the rotating regression imputation procedure described by Welzel. This produces an interval-level latent estimate of emancipative values with a mean of zero and a standard deviation that approaches .5 [see: @gelman2008sri]. Less than one percent of the data are missing after this procedure.
+
+# Additional Statistical Models
+
+I provide several additional statistical models in this section of the appendix. I offer some discussion of the results as well. However, I choose not to include information about the random effects in the model. The `stargazer` package [@hlavac2015s] can efficiently produce LaTeX tables for mixed effects models but only provides information for the fixed effects. The random effects parameters are still useful information but it takes additional effort to extract them and format them.
+
+Unless otherwise noted, each regression table will contain results from five models. The dependent variables for each regression table will be, in order, the strong leader question, the army rule question, the technocracy question, the having a democratic political system question, and the latent "index" estimate.
+
+## Macro-level Models
+
+Table 4 in the manuscript summarizes the results from macro-level models. Those models decompose the two threat indices and estimate each of its indicators along with the other macro-level control variables (i.e. democracy, democratic stock, and territorial threat). The summary condenses the results into plus and minus signs for positive and negative regression parameters that were discernible from zero. "Insignificant" effects were left blank. Table \ref{tab:macrot} provides the full regression summaries.
+
+```{r macromodels, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="asis", warning=F}
+
+
+M11 <- glmer(sldummy ~
+              z_demest + z_demstock + z_ptart + 
+               z_cpi + I(z_lrgdppc*-1) + z_gdploss + z_gini + z_unemploy +
+               z_discpop + z_instab + z_ucdp + z_logwci5ya +  
+              (1  | country) + (1 | country:year) + (1 | year),
+            data=subset(Data), family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)       
+            )
+
+M12 <- glmer(ardummy ~
+              z_demest +  z_demstock + z_ptart + 
+               z_cpi + I(z_lrgdppc*-1) + z_gdploss + z_gini + z_unemploy +
+               z_discpop + z_instab + z_ucdp + z_logwci5ya +  
+              (1  | country) + (1 | country:year) + (1 | year),
+            data=subset(Data), family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)       
+            )
+
+M13 <- glmer(eddummy ~
+              z_demest +  z_demstock + z_ptart + 
+               z_cpi + I(z_lrgdppc*-1) + z_gdploss + z_gini + z_unemploy +
+               z_discpop + z_instab + z_ucdp + z_logwci5ya +  
+              (1  | country) + (1 | country:year) + (1 | year),
+            data=subset(Data), family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)       
+            )
+
+M14 <- glmer(hddummy ~
+              z_demest +  z_demstock + z_ptart + 
+               z_cpi + I(z_lrgdppc*-1) + z_gdploss + z_gini + z_unemploy +
+               z_discpop + z_instab + z_ucdp + z_logwci5ya +  
+              (1  | country) + (1 | country:year) + (1 | year),
+            data=subset(Data), family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)       
+            )
+
+M15 <- lmer(index ~ 
+              z_demest +  z_demstock + z_ptart + 
+               z_cpi + I(z_lrgdppc*-1) + z_gdploss + z_gini + z_unemploy +
+               z_discpop + z_instab + z_ucdp + z_logwci5ya +  
+              (1  | country) + (1 | country:year) + (1 | year),
+            data=Data
+            )
+
+Macrot <- capture.output(
+  stargazer(M11, M12, M13, M14, M15, type="latex", label="tab:macrot", style="ajps",
+            omit.stat=c("aic","bic", "ll"), 
+            model.names=FALSE, dep.var.labels.include = FALSE,
+            title="Macro-level Models of Preferences for Non-Democratic Political Systems",
+            header=FALSE, omit=c("Constant"),
+            covariate.labels=c("Level of Democracy","Democratic Stock",
+                               "Level of Territorial Threat", 
+                               "Consumer Price Index", "GDP per Capita (Real)",
+                               "GDP per Capita Loss (Real)",
+                               "Income Inequality", "Unemployment Rate",
+                               "\\% Discriminated Population", "Political Instability",
+                               "UCDP Intra-state Armed Conflict", 
+                               "Weighted Conflict Index (CNTS)")
+            ))
+
+cat(Macrot, sep="\n")
+
+```
+
+## Social Class as Random Effect
+
+Table 2 in the manuscript showed interesting heterogeneity among the individual-level regression parameters that proxy socioeconomic status. Respondents that place themselves in higher social classes are more likely to prefer strong leaders, army rule, technocracy, and are more likely to hold latent attitudes in favor of autocracy. Respondents in higher social classes are only less likely to think democracy is bad for their country. This is true despite income and education generally having robust *negative* effects on preferences toward autocracy.
+
+I choose to explore why social class has this effect by treating it as a random effect in a mixed effects analysis with just one fixed effect parameter (the intercept) and random effects for country, country-year, and year in addition to the social class random effect. I provide caterpillar plots for the estimated intercepts and conditional variances for each level of the social class random effect for the five models that constitute the core of my empirical analysis.
+
+```{r classranef, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="asis", warning=F, message=F, fig.cap="\\label{fig:classranef}Caterpillar Plots of the Social Class Random Effect", fig.height=8.5}
+
+Data$socialclassf <- NA
+Data$socialclassf[Data$socialclass == 0] <- "Lower Class"
+Data$socialclassf[Data$socialclass == 1] <- "Working Class"
+Data$socialclassf[Data$socialclass == 2] <- "Lower Middle Class"
+Data$socialclassf[Data$socialclass == 3] <- "Upper Middle Class"
+Data$socialclassf[Data$socialclass == 4] <- "Upper Class"
+
+AM1 <- glmer(sldummy ~ (1 | socialclassf) + 
+              (1  | country) + (1 | country:year) + (1 | year),
+            data=subset(Data), family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)       
+            )
+
+am1p <- show_ranef(AM1, "socialclassf", reorder=FALSE) + ggtitle("Strong Leader") + ylab("")
+
+AM2 <- glmer(ardummy ~ (1 | socialclassf) + 
+              (1  | country) + (1 | country:year) + (1 | year),
+            data=subset(Data), family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)       
+            )
+
+am2p <- show_ranef(AM2, "socialclassf", reorder=FALSE) + ggtitle("Army Rule") + ylab("")
+
+AM3 <- glmer(eddummy ~ (1 | socialclassf) + 
+              (1  | country) + (1 | country:year) + (1 | year),
+            data=subset(Data), family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)       
+            )
+
+am3p <- show_ranef(AM3, "socialclassf", reorder=FALSE) + ggtitle("Technocracy") + ylab("")
+
+AM4 <- glmer(hddummy ~ (1 | socialclassf) + 
+              (1  | country) + (1 | country:year) + (1 | year),
+            data=subset(Data), family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)       
+            )
+
+am4p <- show_ranef(AM4, "socialclassf", reorder=FALSE) + ggtitle("Oppose Democracy") + ylab("")
+
+AM5 <- lmer(index ~ 
+              (1 | socialclassf) + 
+              (1  | country) + (1 | country:year) + (1 | year),
+            data=Data
+            )
+
+am5p <- show_ranef(AM5, "socialclassf", reorder=FALSE) + ggtitle("Index") + ylab("")
+
+multiplot(am1p, am2p, am3p, am4p, am5p, cols=2)
+
+```
+
+Figure \ref{fig:classranef} provides some insight to why this social class variable is positive and statistically significant in four of the five models. The short answer appears to put emphasis on those who self-identify as the upper class, the highest value  observed in the WVS data. The upper class appears to be the reason why the social class variable is positive and statistically significant in the strong leaders model. There appears to be no difference among the other classes in their preferences toward a head of state with broad discretionary authority without intereference from legislatures or elections. We can make a similar comment about preferences for army rule as well. The conditional variances for the technocracy model suggest some kind of curvilinear effect where the two middle classes are less likely to prefer technocracy relative to the upper class and the two lower classes. Only the fourth model, which estimates opposition to having a democracy, conforms to conventional wisdom about opposition to democracy concentrating among the lower classes relative to the higher classes.
+
+## Democratic Stock as Deciles and Varying Slopes for Age
+
+I use this section of the appendix to address two comments from two of the three anonymous reviewers for *Political Behavior*. R3 expressed interest that an earlier version of my manuscript found little support for the argument that democracy depresses authoritarian preferences among citizens. S/he suggested that a better test of institutional learning arguments [prominently @putnam1993mdw] should include a measure of democratic longevity. R1 suggested that a previous version of my analysis did not include a way of showing whether a respondent in a country like Zimbabwe has any knowledge of what democracy is like. A 40-year-old respondent in Zimbabwe will not have the same knowledge of democracy as a 40-year-old respondent in Canada.
+
+```{r demqt, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="hide", warning=F, message=F}
+
+Data$demquantile <- as.integer(cut(Data$demstock, 
+                                   quantile(Data$demstock, probs=0:10/10, na.rm = TRUE),
+                                   include.lowest=TRUE, right=FALSE))
+
+Data$demquantile <- Data$demquantile - 1
+
+Demq <- unique(sqldf("select country, year, demquantile from Data"))
+Demq$countryyear <- paste(Demq$country,", ",Demq$year, sep="")
+
+Demq <- Demq[, c(4,3)]
+Demq <- Demq[order(Demq$demquantile, Demq$countryyear),] 
+
+Demq$seq <- seq(1,nrow(Demq))
+
+splitted <- split(Demq, cut(Demq$seq, 3))
+
+Demq <- cbind.fill(splitted[[1]], splitted[[2]], splitted[[3]])
+
+Demq <- Demq[, c(1, 2, 4, 5, 7, 8)]
+
+Demqt <- capture.output(stargazer(Demq, type = "latex",
+          summary = FALSE, rownames = FALSE, header=FALSE, font.size = "footnotesize",
+          title="The Democratic Stock Deciles",
+          label="tab:demq"))
+
+Demqt[9] <- "\\textbf{{Country, Year}} & \\textbf{{Decile}} & \\textbf{{Country, Year}} & \\textbf{{Decile}} & \\textbf{{Country, Year}} & \\textbf{{Decile}} \\\\ "
+
+cat(Demqt, sep='\n') 
+
+```
+
+The results in the manuscript provide a partial correction with the democratic stock variable that I describe. Figure \ref{fig:demage} provides an additional test by allowing the slope for age to vary across a random effect of deciles that I condense from the democratic stock variable. The results here provide some insight to why the democratic stock variable does not have a consistent negative relationship with the five variables I analyze in the manuscript. Notice the random intercepts for the deciles show a discernible, if noisy, downward pattern in the index panel and the army rule panel. Compare that with the intercepts for the models in which the democratic stock variable is insignificant. There only appears to be a depressing effect of democratic longevity and attitudes toward strong leaders and technocracy among the longest-running democratic countries. There is no discernible effect elsewhere.
+
+```{r demagemodels, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="asis", warning=F, message=F}
+
+Data$demquantile <- as.integer(cut(Data$demstock, 
+                                   quantile(Data$demstock, probs=0:10/10, na.rm = TRUE),
+                                   include.lowest=TRUE, right=FALSE))
+
+Data$demquantile <- Data$demquantile - 1
+
+library(optimx)
+library(blme)
+AM6 <- glmer(sldummy ~
+              z_age +
+              z_eti + z_sti + z_demest + z_ptart + 
+              (1  | country) + (1 | country:year) + (1 | year) + (1 + z_age | demquantile),
+             control = glmerControl(optimizer = "optimx", calc.derivs = FALSE,
+     optCtrl = list(method = "nlminb", starttests = FALSE, kkt = FALSE)),
+            data=subset(Data), family=binomial(link="logit")
+            )
+
+am6p <- show_ranef(AM6, "demquantile", reorder=TRUE) + facet_wrap(~variable,scale="free_x", labeller = as_labeller(c(`(Intercept)` = "Intercept", `z_age`="Age (Standardized)"))) + ylab("") + ggtitle("Strong Leader")
+
+AM7 <- bglmer(ardummy ~  
+              z_age  +
+              z_eti + z_sti + z_demest + z_ptart + 
+              (1  | country) + (1 | country:year) + (1 | year) + (1 + z_age | demquantile),
+            data=subset(Data), family=binomial(link="logit")
+                ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)
+            )
+
+am7p <- show_ranef(AM7, "demquantile") + facet_wrap(~variable,scale="free_x", labeller = as_labeller(c(`(Intercept)` = "Intercept", `z_age`="Age (Standardized)"))) + ylab("") + ggtitle("Army Rule")
+
+AM8 <- glmer(eddummy ~  
+              z_age  +
+              z_eti + z_sti + z_demest + z_ptart + 
+              (1  | country) + (1 | country:year) + (1 | year) + (1 + z_age | demquantile),
+             control = glmerControl(optimizer = "optimx", calc.derivs = FALSE,
+     optCtrl = list(method = "nlminb", starttests = FALSE, kkt = FALSE)),
+            data=subset(Data), family=binomial(link="logit")    
+            )
+
+am8p <- show_ranef(AM8, "demquantile") + facet_wrap(~variable,scale="free_x", labeller = as_labeller(c(`(Intercept)` = "Intercept", `z_age`="Age (Standardized)"))) + ylab("") + ggtitle("Technocracy")
+
+AM9 <- glmer(hddummy ~
+              z_age  +
+              z_eti + z_sti + z_demest + z_ptart + 
+              (1  | country) + (1 | country:year) + (1 | year) + (1 + z_age | demquantile),
+             control = glmerControl(optimizer = "optimx", calc.derivs = FALSE,
+     optCtrl = list(method = "nlminb", starttests = FALSE, kkt = FALSE)),
+            data=subset(Data), family=binomial(link="logit")
+            )
+
+am9p <- show_ranef(AM9, "demquantile") + facet_wrap(~variable,scale="free_x", labeller = as_labeller(c(`(Intercept)` = "Intercept", `z_age`="Age (Standardized)"))) + ylab("") + ggtitle("Oppose Democracy")
+
+AM10 <- lmer(index ~ 
+              z_age +
+              z_eti + z_sti + z_demest + z_ptart + 
+              (1  | country) + (1 | country:year) + (1 | year) + (1 + z_age | demquantile),
+            data=Data
+            
+            )
+
+am10p <- show_ranef(AM10, "demquantile") + facet_wrap(~variable,scale="free_x", labeller = as_labeller(c(`(Intercept)` = "Intercept", `z_age`="Age (Standardized)"))) + ylab("") + ggtitle("Index")
+
+```
+
+```{r demageplot, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="asis", warning=F, message=F, fig.cap="\\label{fig:demage}Caterpillar Plots of the Democratic Deciles Random Effect (with Varying Slopes for Age)", fig.height=8.5}
+
+multiplot(am6p, am7p, am8p, am9p, am10p, cols=2)  
+
+```
+
+The random slopes for age suggest that older respondents are less likely to hold attitudes in favor of non-democratic political systems among the most mature democratic countries. Increasing age also appears to increase support for army rule and technocracy among the least democratically mature (i.e. most enduring authoritarian countries). Elsewhere, there does not appear to be much of a relationship between age and support for authoritarian preferences other than the overall negative effect in all but the model that estimates support for a strong leader.
+
+## The Curious Effect of Emancipative Values
+
+R3 asked that I look at @welzel2013fr and estimate his "emancipative values" variable in my model as well. I note in the manuscript that the emancipative values variable is reliably the most precise parameter of any of the fixed effects. Its *z*-value even gets into the 60s. Its inclusion also has a powerful effect on some of the other micro-level variables. Observe Table \ref{tab:noemanc}, which omits the emancipative values variable from the same series of models that comprise Table 2 in the manuscript.
+
+```{r noemanc, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="asis", warning=F}
+
+
+AM11 <- glmer(sldummy ~
+              z_age + collegeed  + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart + 
+              (1  | country) + (1 | country:year) + (1 | year),
+            data=subset(Data), family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)       
+            )
+
+AM12 <- glmer(ardummy ~  
+              z_age + collegeed + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data, family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)       
+            )
+
+AM13 <- glmer(eddummy ~  
+              z_age + collegeed  + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data, family=binomial(link="logit") 
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)            
+
+            )
+
+AM14 <- glmer(hddummy ~
+              z_age + collegeed + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data, family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE) 
+            )
+
+AM15 <- lmer(index ~ 
+              z_age + collegeed +  female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data
+            
+            )
+
+Noemanct <- capture.output(
+  stargazer(AM11, AM12, AM13, AM14, AM15, type="latex", label="tab:noemanc",
+                   style="ajps", header=FALSE,
+                   title="Multi-level Models of Preferences for Non-Democratic Political Systems (without Emancipative Values)",
+                   covariate.labels=c("Age", "College Education",
+                                      "Female", "Financial Satisfaction",
+                                      "Household Income", "Ideology (L to R)",
+                                      "Personal Efficacy",
+                                      "Political Interest",
+                                      "Social Class", "Traditional Values", "Unemployed",
+                                      "Economic Threat Index", "Societal Threat Index",
+                                      "Level of Democracy", "Democratic Stock",
+                                      "Level of Territorial Threat"),
+                   omit=c("Constant"), model.names=FALSE, dep.var.labels.include = FALSE,
+                   omit.stat=c("aic","bic", "ll"), digit.separator=",",
+                   font.size="small"))
+
+cat(Noemanct, sep="\n")
+
+```
+
+A comparison of Table \ref{tab:noemanc} with Table 2 shows the curious effect the emancipative values variable has on the other micro-level coefficients. Its inclusion in the strong leaders model makes age and personal efficacy statistically insignificant. Age had a positive and significant effect in Model 1 in Table \ref{tab:noemanc}, a divergence from the overall relationship between age and attitudes toward strong leaders we observe in the other four models. Personal efficacy had the robust negative and significant effect in Model 1 with the exclusion of the emancipative values variable. Observe the traditional values variable in Model 1, Model 3, and Model 5 in Table \ref{tab:noemanc} compared to Model 6, Model 8, and Model 10 in Table 2 and the manuscript. The emancipative values variable flips a positive and significant effect for traditional values into a negative and significant effect.
+
+The parameters for the other variables are basically unchanged for the inclusion of the emancipative values variable. Importantly, the coefficients and precision for the macro-level variables remain the same. However, the @welzel2013fr "emancipative values" framework has important effects in the models I estimate beyond its robust and precise effect on decreasing attitudes in favor of various authoritarian political systems.
+
+## Cross-level Interactions for Emancipative Values and Education
+
+R3 wanted more analyses in my manuscript. Space limitation spreclude these tests from inclusion into the main body of an already long manuscript, but I will estimate and summarize them here.
+
+R3 wanted cross-level interactions for the threat indices with emancipative values and education. These results comprise Table \ref{tab:crossemanc} and Table \ref{tab:crossed}, respectively. The interaction between the economic threat index and emancipative values is significant all but the technocracy model while the constituent terms of the interaction are also significant. The positive and significant interaction suggests economic threat has a stronger effect on those scoring higher in emancipative values. We see a similar effect on the college educated in Table \ref{tab:crossed}.
+
+```{r crossemanc, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="asis", warning=F}
+
+
+AM16 <- glmer(sldummy ~
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+                z_eti:z_emanc + z_sti:z_emanc +
+              (1  | country) + (1 | country:year) + (1 | year),
+            data=subset(Data), family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)       
+            )
+
+AM17 <- glmer(ardummy ~  
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+                z_eti:z_emanc + z_sti:z_emanc +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data, family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)       
+            )
+
+AM18 <- glmer(eddummy ~  
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+               z_eti:z_emanc + z_sti:z_emanc + 
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data, family=binomial(link="logit") 
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)            
+
+            )
+
+AM19 <- glmer(hddummy ~
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+                z_eti:z_emanc + z_sti:z_emanc +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data, family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE) 
+            )
+
+AM20 <- lmer(index ~ 
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+               z_eti:z_emanc + z_sti:z_emanc +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data
+            
+            )
+
+Crossemanct <- capture.output(
+  stargazer(AM16, AM17, AM18, AM19, AM20, type="latex", label="tab:crossemanc",
+                   style="ajps", header=FALSE,
+                   title="Multi-level Models of Preferences for Non-Democratic Political Systems (Interactions with Emancipative Values)",
+                   covariate.labels=c("Age", "College Education",
+                                      "Emancipative Values",
+                                      "Female", "Financial Satisfaction",
+                                      "Household Income", "Ideology (L to R)",
+                                      "Personal Efficacy",
+                                      "Political Interest",
+                                      "Social Class", "Traditional Values", "Unemployed",
+                                      "Economic Threat Index (ETI)", "Societal Threat Index (STI)",
+                                      "Level of Democracy", "Democratic Stock",
+                                      "Level of Territorial Threat",
+                                      "ETI*Emancipative Values",
+                                      "STI*Emancipative Values"),
+                   omit=c("Constant"), model.names=FALSE, dep.var.labels.include = FALSE,
+                   omit.stat=c("aic","bic", "ll"), digit.separator=",",
+                   font.size="small"))
+
+cat(Crossemanct, sep="\n")
+
+```
+
+```{r crossed, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="asis", warning=F}
+
+
+AM21 <- glmer(sldummy ~
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+                z_eti:collegeed + z_sti:collegeed +
+              (1  | country) + (1 | country:year) + (1 | year),
+            data=subset(Data), family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)       
+            )
+
+AM22 <- glmer(ardummy ~  
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+                z_eti:collegeed + z_sti:collegeed +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data, family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)       
+            )
+
+AM23 <- glmer(eddummy ~  
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+               z_eti:collegeed + z_sti:collegeed +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data, family=binomial(link="logit") 
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)            
+
+            )
+
+AM24 <- glmer(hddummy ~
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+                z_eti:collegeed + z_sti:collegeed +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data, family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE) 
+            )
+
+AM25 <- lmer(index ~ 
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+               z_eti:collegeed + z_sti:collegeed +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data
+            
+            )
+
+Crossedt <- capture.output(
+  stargazer(AM21, AM22, AM23, AM24, AM25, type="latex", label="tab:crossed",
+                   style="ajps", header=FALSE,
+                   title="Multi-level Models of Preferences for Non-Democratic Political Systems (Interactions with College Education)",
+                   covariate.labels=c("Age", "College Education",
+                                      "Emancipative Values",
+                                      "Female", "Financial Satisfaction",
+                                      "Household Income", "Ideology (L to R)",
+                                      "Personal Efficacy",
+                                      "Political Interest",
+                                      "Social Class", "Traditional Values", "Unemployed",
+                                      "Economic Threat Index (ETI)", "Societal Threat Index (STI)",
+                                      "Level of Democracy", "Democratic Stock",
+                                      "Level of Territorial Threat",
+                                      "ETI*College Education",
+                                      "STI*College Education"),
+                   omit=c("Constant"), model.names=FALSE, dep.var.labels.include = FALSE,
+                   omit.stat=c("aic","bic", "ll"), digit.separator=",",
+                   font.size="small"))
+
+cat(Crossedt, sep="\n")
+
+```
+
+```{r getsims, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="hide", message=F}
+
+newdata <- with(Data, 
+                data.frame(ass="sdkf", sldummy=0, z_age=0, collegeed=c(0, 0, 1, 1), z_emanc=0,
+                           female=median(female), z_satisf=0, z_inc=0, z_ideo=0,
+                           z_agency=0, z_intp=0, z_class=0, z_tradv=0, 
+                           unemployed=median(unemployed),
+                           z_eti=c(-.5, .5), z_sti=0, z_demest=0,  z_demstock=0,
+                           z_ptart=0, country=0, "country:year"=0, year=0)
+                )
+
+newdata$"collegeed:z_eti" <- with(newdata, z_eti*collegeed)
+newdata$"collegeed:z_sti" <- with(newdata, z_sti*collegeed)
+
+AM21sims <- get_sims(AM21, newdata, newdata$z_eti, newdata$collegeed, 1000, 8675309)
+AM21sims0 <- AM21sims[AM21sims$x2 == 0, ]
+AM21inrow0 <- make_qi_row(AM21sims0, AM21sims0$x1,  "Strong Leader (No College)", logit=TRUE)
+AM21sims1 <- AM21sims[AM21sims$x2 == 1, ]
+AM21inrow1 <- make_qi_row(AM21sims1, AM21sims1$x1,  "Strong Leader (College Ed.)", logit=TRUE)
+
+newdata <- with(Data, 
+                data.frame(hddummy=0, z_age=0, collegeed=c(0, 0, 1, 1), z_emanc=0,
+                           female=median(female), z_satisf=0, z_inc=0, z_ideo=0,
+                           z_agency=0, z_intp=0, z_class=0, z_tradv=0, 
+                           unemployed=median(unemployed),
+                           z_eti=c(-.5, .5), z_sti=0, z_demest=0,  z_demstock=0,
+                           z_ptart=0, country=0, "country:year"=0, year=0)
+                )
+
+newdata$"collegeed:z_eti" <- with(newdata, z_eti*collegeed)
+newdata$"collegeed:z_sti" <- with(newdata, z_sti*collegeed)
+
+AM24sims <- get_sims(AM24, newdata, newdata$z_eti, newdata$collegeed, 1000, 8675309)
+AM24sims0 <- AM24sims[AM24sims$x2 == 0, ]
+am24inrow0 <- make_qi_row(AM24sims0, AM24sims0$x1,  "Index (No College)", logit=TRUE)
+AM24sims1 <- AM24sims[AM24sims$x2 == 1, ]
+am24inrow1 <- make_qi_row(AM24sims1, AM24sims1$x1,  "Index (College Ed.)", logit=TRUE)
+
+newdata <- with(Data, 
+                data.frame(index=0, z_age=0, collegeed=c(0, 0, 1, 1), z_emanc=0,
+                           female=median(female), z_satisf=0, z_inc=0, z_ideo=0,
+                           z_agency=0, z_intp=0, z_class=0, z_tradv=0, 
+                           unemployed=median(unemployed),
+                           z_eti=c(-.5, .5), z_sti=0, z_demest=0,  z_demstock=0,
+                           z_ptart=0, country=0, "country:year"=0, year=0)
+                )
+
+newdata$"collegeed:z_eti" <- with(newdata, z_eti*collegeed)
+newdata$"collegeed:z_sti" <- with(newdata, z_sti*collegeed)
+
+AM25sims <- get_sims(AM25, newdata, newdata$z_eti, newdata$collegeed, 1000, 8675309)
+AM25sims0 <- AM25sims[AM25sims$x2 == 0, ]
+am25inrow0 <- make_qi_row(AM25sims0, AM25sims0$x1,  "Index (No College)", logit=FALSE)
+AM25sims1 <- AM25sims[AM25sims$x2 == 1, ]
+am25inrow1 <- make_qi_row(AM25sims1, AM25sims1$x1,  "Index (College Ed.)", logit=FALSE)
+
+
+# AM25.predvalues <- cbind(newdata, predictSE(AM25, newdata = newdata, type = "response", , se.fit = TRUE, re.form=NA))
+# AM25.predvalues$lb <- with(AM25.predvalues, fit - (1.645 * se.fit))
+# AM25.predvalues$ub <- with(AM25.predvalues, fit + (1.645 * se.fit))
+
+
+```
+
+The interaction between the societal threat index and emancipative values is also significant in four of the five models in Table \ref{tab:crossemanc} even though the societal threat index itself is significant only in the model that estimates attitudes toward army rule. The interaction is significant in just the strong leader and index model in Table \ref{tab:crossed}.
+
+## "Disease Stress" and "Life Histories"
+
+R3 also asked for models that estimate other contextual variables that approximate the concept of "societal threat" under study in the manuscript. R3 asked that I look into the "life history model" [e.g. @woodley2012lhm], which argues that the opportunity for self-development is greater in countries with longer life expectancies, lower fertility, more education, less income inequality, and higher economic development. The final two indicators comprise my economic threat index but I was able to estimate the three other components of the life history model in one index. Formally, these three indicators are the life expectancy at birth in years, the (proportionally inverted) fertility rate (births per woman, total), and the gross tertiary enrolment ratio for both sexes. These three variables come from the World Bank. I also included the proportion of respondents that have a college education to address the extent of missingness in the gross tertiary enrolment ratio variable. I do the same graded response model approach with this variable as I do for the emancipative values and traditional values variables.
+
+```{r lifeh, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="asis", warning=F}
+
+
+AM26 <- glmer(sldummy ~
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+                z_lifeh +
+              (1  | country) + (1 | country:year) + (1 | year),
+            data=subset(Data), family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)       
+            )
+
+AM27 <- glmer(ardummy ~  
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+                z_lifeh +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data, family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)       
+            )
+
+AM28 <- glmer(eddummy ~  
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+               z_lifeh +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data, family=binomial(link="logit") 
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)            
+
+            )
+
+AM29 <- glmer(hddummy ~
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+                z_lifeh +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data, family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE) 
+            )
+
+AM30 <- lmer(index ~ 
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+               z_lifeh +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data
+            
+            )
+
+Lifeht <- capture.output(
+  stargazer(AM26, AM27, AM28, AM29, AM30, type="latex", label="tab:lifeh",
+                   style="ajps", header=FALSE,
+                   title="Multi-level Models of Preferences for Non-Democratic Political Systems (with Life Histories)",
+                   covariate.labels=c("Age", "College Education",
+                                      "Emancipative Values",
+                                      "Female", "Financial Satisfaction",
+                                      "Household Income", "Ideology (L to R)",
+                                      "Personal Efficacy",
+                                      "Political Interest",
+                                      "Social Class", "Traditional Values", "Unemployed",
+                                      "Economic Threat Index", "Societal Threat Index",
+                                      "Level of Democracy", "Democratic Stock",
+                                      "Level of Territorial Threat",
+                                      "Life History"),
+                   omit=c("Constant"), model.names=FALSE, dep.var.labels.include = FALSE,
+                   omit.stat=c("aic","bic", "ll"), digit.separator=",",
+                   font.size="small"))
+
+cat(Lifeht, sep="\n")
+
+```
+
+I summarize the results in Table \ref{tab:lifeh}. The parameter for the life histories variable is significant in only the model that estimates attitudes toward army rule. The other variables remain unchanged after the inclusion of this variable.
+
+Table \ref{tab:disease} contains a proxy for the "disease stress" argument. @thornhillfincher2014pst offer a broad argument that links the effects of parasitic hosts to basic human values and social behavior. Simply, they contend that high-pathogen environments lead to change in the behavioral component to the human immune system.[^criticismds] These are familiar behaviors of ingroup-bias, outgroup-aggression, xenophobia, classic "conservative" values, collectivism and other attitudes of interest to political behavior researchers. I proxy this argument with *Global Burden of Disease* data from the Institute for Health Metrics and Evaluation on total death rate (as a percent) by communicable, maternal, neonatal, and nutritional diseases for each country in the world.
+
+[^criticismds]: A social scientist would have to suspend a lot of disbelief to take the @thornhillfincher2014pst with no reservation. Their analysis commits multiple errors, perhaps none bigger than a curious assertion that correlation reflects causation. Most of their no analyses put forward no concern of confounders; they appear to selectively provide controls contingent on the analysis. They further assume independence of countries and other territorial units that those well-versed in mixed effects modeling would find equally problematic. The authors appear to be an evolutionary biologist and an ecologist. Unsurprisingly, their analysis resembles a tired belief in the "hard sciences" that social sciences must be so easy that they could do it without genuine concern for methodological issues in the social sciences or the past scholarship on a particular topic.
+
+```{r disease, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="asis", warning=F}
+
+
+AM31 <- glmer(sldummy ~
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+                z_dcmnnd +
+              (1  | country) + (1 | country:year) + (1 | year),
+            data=subset(Data), family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)       
+            )
+
+AM32 <- glmer(ardummy ~  
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+                z_dcmnnd +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data, family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)       
+            )
+
+AM33 <- glmer(eddummy ~  
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+               z_dcmnnd +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data, family=binomial(link="logit") 
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)            
+
+            )
+
+AM34 <- glmer(hddummy ~
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+                z_dcmnnd +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data, family=binomial(link="logit")
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE) 
+            )
+
+AM35 <- lmer(index ~ 
+              z_age + collegeed + z_emanc + female + z_satisf + z_inc + z_ideo + z_agency + z_intp + z_class + z_tradv + unemployed +
+              z_eti + z_sti + z_demest + z_demstock + z_ptart +
+               z_dcmnnd +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=Data
+            
+            )
+
+Diset <- capture.output(
+  stargazer(AM31, AM32, AM33, AM34, AM35, type="latex", label="tab:disease",
+                   style="ajps", header=FALSE,
+                   title="Multi-level Models of Preferences for Non-Democratic Political Systems (with Disease Stress)",
+                   covariate.labels=c("Age", "College Education",
+                                      "Emancipative Values",
+                                      "Female", "Financial Satisfaction",
+                                      "Household Income", "Ideology (L to R)",
+                                      "Personal Efficacy",
+                                      "Political Interest",
+                                      "Social Class", "Traditional Values", "Unemployed",
+                                      "Economic Threat Index", "Societal Threat Index",
+                                      "Level of Democracy", "Democratic Stock",
+                                      "Level of Territorial Threat",
+                                      "Disease Stress"),
+                   omit=c("Constant"), model.names=FALSE, dep.var.labels.include = FALSE,
+                   omit.stat=c("aic","bic", "ll"), digit.separator=",",
+                   font.size="small"))
+
+cat(Diset, sep="\n")
+
+```
+
+The results from Table \ref{tab:disease} show similar weak support for this argument. The disease stress proxy has only a significant effect on support for rule of government by the army. The other parameters in the five models remain unchanged after the inclusion of this variable.
+
+## Expanded Sample
+
+R2 expressed additional concerns that my focus on the third, fourth, and fifth waves of WVS data amounted to an "unusual choice of sample" that can be corrected with adding the sixth wave and the two relevant waves from European Values Survey (EVS). I noted that the main analyses I conduct were unable to accommodate these requests because individual-level covariates R3 wanted are unavailable in the EVS while the external threat measures R1 wanted are unavailable after 2010. This is, incidentally, when most of the sixth wave starts. R2 still felt an expanded sample was necessary even if it meant a minimal macro-level mixed effects model comparable to what I present in Table 1 in the manuscript.
+
+I present the results of such an analysis here. Whereas missingness on the dependent variable is approximately 10-percent of the original data frame, I do not pursue the multivariate imputation procedure I discussed above. I also exclude the external threat control. The result is an expanded sample that includes over 120,000 more observations, 13 new countries, and 120 more country-years than I report in Table 1 in the manuscript.
+
+However, the findings are fundamentally the same. The parameter for the level of democracy loses significance in Model 3 and Model 4. However, the effects of the economic treat index and societal threat index are unchanged after using this expanded sample. The two waves of EVS data and sixth wave of WVS data do not materially change the inferences I report in the manuscript.
+
+```{r all, eval=TRUE, echo=FALSE, tidy = TRUE, size="small", cache=TRUE, results="asis", warning=F}
+
+All <- read.csv("~/Dropbox/projects/etst/appendix/etst-data-all-r2.csv")
+
+
+M1 <- glmer(sldummy ~
+              z_eti + z_sti + z_demest + z_demstock +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=subset(All), family=binomial(link="logit")#
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)
+              )
+
+M2 <- glmer(ardummy ~
+              z_eti + z_sti + z_demest + z_demstock +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=subset(All), family=binomial(link="logit")#
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)
+              )
+
+M3 <- glmer(eddummy ~
+              z_eti + z_sti + z_demest + z_demstock +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=subset(All), family=binomial(link="logit")#
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)
+              )
+
+M4 <- glmer(hddummy ~
+              z_eti + z_sti + z_demest + z_demstock +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=subset(All), family=binomial(link="logit")#
+            ,control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE)
+              )
+
+M5 <- lmer(index ~ 
+              z_eti + z_sti + z_demest + z_demstock +
+              (1 | country) + (1 | country:year) + (1 | year) ,
+            data=All
+            )
+
+AllTable <- capture.output(stargazer(M1, M2, M3, M4, M5, 
+                   style="ajps", header=FALSE,
+                   title="Macro-level Mixed Effects Models of Preferences for Non-Democratic Political Systems (with EVS and Sixth Wave WVS)",
+                   omit=c("Constant"), model.names=FALSE, dep.var.labels.include = FALSE,
+                   omit.stat=c("aic","bic", "ll"), digit.separator=",",
+                   covariate.labels=c("Economic Threat Index", "Societal Threat Index",
+                                      "Level of Democracy", "Democratic Stock"),
+                   notes=c("$\\dagger$ p < 0.10 (Macro-level)"),
+                   star.cutoffs = c(.1, .1, .1), star.char = c("\\dagger", "\\dagger", "\\dagger"),
+                   font.size="small"
+))
+
+AllTable <- AllTable[-20] 
+
+modelnames <- c("\\\\[-1.8ex] & \\emph{Strong} & \\emph{Army} &  & \\emph{Democracy} & \\\\", "\\\\[-1.8ex] & \\emph{Leader} & \\emph{Rule} & \\emph{Technocracy} & \\emph{is Bad} & \\emph{Index}\\\\ ")
+
+AllTable <- c(AllTable[a <- 1:7], modelnames, AllTable[-a])
+
+randomeffect <- "{\\bf Random Effect} & & & & & \\\\"
+microlevel <- "{\\bf Micro-level} & & & & & \\\\"
+macrolevel <- "{\\bf Macro-level} & & & & & \\\\"
+hline <- "\\hline"
+newline <- "\\\\"
+
+ranef_sd <- function(model, grp){
+  vc <- as.data.frame(VarCorr(model))
+  result <- vc$sdcor[ vc$grp == grp]
+  result <- sprintf("%.3f", round(result, 3))
+  return(result)
+}
+
+row.sd.country <- paste("Country Standard Deviation & ", 
+                               ranef_sd(M1, "country"), "&", 
+                           ranef_sd(M2, "country"), "&",
+                           ranef_sd(M3, "country"), "&",
+                           ranef_sd(M4, "country"), "&",
+                           ranef_sd(M5, "country"), "\\\\")
+
+row.n.country <- paste("\\# of Countries &",
+                         sapply(ranef(M1),nrow)["country"], "&", 
+                         sapply(ranef(M2),nrow)["country"], "&",
+                         sapply(ranef(M3),nrow)["country"], "&",
+                         sapply(ranef(M4),nrow)["country"], "&",
+                         sapply(ranef(M5),nrow)["country"], "\\\\")
+
+row.sd.countryyear <- paste("Country-Year Standard Deviation & ", 
+                               ranef_sd(M1, "country:year"), "&", 
+                           ranef_sd(M2, "country:year"), "&",
+                           ranef_sd(M3, "country:year"), "&",
+                           ranef_sd(M4, "country:year"), "&",
+                           ranef_sd(M5, "country:year"), "\\\\")
+
+row.n.countryyear <- paste("\\# of Country-Years &",
+                         sapply(ranef(M1),nrow)["country:year"], "&", 
+                         sapply(ranef(M2),nrow)["country:year"], "&",
+                         sapply(ranef(M3),nrow)["country:year"], "&",
+                         sapply(ranef(M4),nrow)["country:year"], "&",
+                         sapply(ranef(M5),nrow)["country:year"], "\\\\")
+
+row.sd.year <- paste("Year Standard Deviation & ", 
+                               ranef_sd(M1, "year"), "&", 
+                           ranef_sd(M2, "year"), "&",
+                           ranef_sd(M3, "year"), "&",
+                           ranef_sd(M4, "year"), "&",
+                           ranef_sd(M5, "year"), "\\\\")
+
+row.n.year <- paste("\\# of Years &",
+                         sapply(ranef(M1),nrow)["year"], "&", 
+                         sapply(ranef(M2),nrow)["year"], "&",
+                         sapply(ranef(M3),nrow)["year"], "&",
+                         sapply(ranef(M4),nrow)["year"], "&",
+                         sapply(ranef(M5),nrow)["year"], "\\\\")
+
+insertres <- c(hline, randomeffect, hline, row.n.country, row.sd.country,
+                 newline, row.n.countryyear, row.sd.countryyear,
+                 newline, row.n.year, row.sd.year, hline)
+
+AllTable <- c(AllTable[a <- 1:19], insertres, AllTable[-a])
+
+cat(AllTable, sep='\n')
+
+```
+
+\newpage
