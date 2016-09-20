@@ -23,6 +23,8 @@ biblio-style: apsr
 subtitle: Supplemental Appendix
 tables: yes
 anonymous: no
+header-includes:
+- \usepackage{fontawesome}
 ---
 
 ```{r setup, include=FALSE}
@@ -450,7 +452,7 @@ I chose a novel approach to multiple imputation of missing data that more social
 
 I follow their advice in my multiple imputation approach to efficiently and quickly deal with missing data in my analysis. I impute 100 full data sets from a reproducible seed (`8675309`).[^jenny] Thereafter, I use the mean of the 100 estimates for each non-interval data (i.e. all variables that were not the traditional or emancipative values). This generates one full data set that I use in the analyses in my manuscript.
 
-[^jenny]: Jenny, I got your number. I need to make you mine. Jenny, don't change your number...
+[^jenny]: \faMusic &nbsp; Jenny, I got your number. I need to make you mine. Jenny, don't change your number... &nbsp;\faMusic
 
 ## Coding Territorial Threat
 
